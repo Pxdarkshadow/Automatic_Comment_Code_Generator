@@ -11,5 +11,3 @@ matplotlib
 numpy
 pandas
 transformers
-fastapi
-uvicorn
