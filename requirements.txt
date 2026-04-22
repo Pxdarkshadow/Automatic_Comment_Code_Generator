@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch
+torchvision
+torchaudio
+datasets
+bert-score
+tqdm
+tabulate
+matplotlib
+numpy
+pandas
+transformers
+fastapi
+uvicorn
