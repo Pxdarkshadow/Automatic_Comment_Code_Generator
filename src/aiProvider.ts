@@ -26,71 +26,21 @@ export interface GenerationResult {
  * and surfaces the computed textual result while reporting status milestones back to the invocation source.
  */
 export async function generateComment(code: string, progressCallback: (msg: string) => void): Promise<GenerationResult> {
-    progressCallback("Starting local PyTorch model inference...");
+    progressCallback("Reaching out to AWS AI model...");
     
-    return new Promise((resolve, reject) => {
-        const scriptPath = path.join(__dirname, '..', 'model', 'predict.py');
-        const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
-        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len 8 --max-len 48 --length-alpha 0.7 --repetition-penalty 1.3`;
-        
-        exec(command, { cwd: path.join(__dirname, '..', 'model') }, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error during inference: ${error.message}`);
-                reject(error);
-                return;
-            }
-            if (stderr) {
-                console.warn(`Python Script Stderr: ${stderr}`);
-            }
-            
-            const out = stdout.trim();
-            if (!out) {
-                resolve({
-                    comment: "Model generated an empty string",
-                    rawComment: "",
-                    usedFallback: true,
-                    fallbackReason: "empty_stdout",
-                    fallbackRule: "provider:empty_stdout",
-                    tokenizedLength: 0,
-                    sourceTokenBudget: 0,
-                    truncated: false,
-                    decodingMode: "unknown",
-                    candidateCount: 0,
-                    latencyMs: 0,
-                });
-                return;
-            }
+    // Replace the IP below with your actual EC2 Public IPv4 address
+    const AWS_URL = "http://54.83.241.186:8000/predict"; 
 
-            try {
-                const parsed = JSON.parse(out);
-                resolve({
-                    comment: String(parsed.comment || "").trim() || "Model generated an empty string",
-                    rawComment: String(parsed.raw_comment || ""),
-                    usedFallback: Boolean(parsed.used_fallback),
-                    fallbackReason: parsed.fallback_reason ?? null,
-                    fallbackRule: parsed.fallback_rule ?? null,
-                    tokenizedLength: Number(parsed.tokenized_length ?? 0),
-                    sourceTokenBudget: Number(parsed.source_token_budget ?? 0),
-                    truncated: Boolean(parsed.truncated),
-                    decodingMode: String(parsed.decoding_mode || "unknown"),
-                    candidateCount: Number(parsed.candidate_count ?? 0),
-                    latencyMs: Number(parsed.latency_ms ?? 0),
-                });
-            } catch {
-                resolve({
-                    comment: out,
-                    rawComment: out,
-                    usedFallback: false,
-                    fallbackReason: "provider_non_json",
-                    fallbackRule: "provider:legacy_stdout",
-                    tokenizedLength: 0,
-                    sourceTokenBudget: 0,
-                    truncated: false,
-                    decodingMode: "unknown",
-                    candidateCount: 1,
-                    latencyMs: 0,
-                });
-            }
-        });
+    const response = await fetch(AWS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code })
     });
+
+    if (!response.ok) {
+        throw new Error(`AWS Error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data as GenerationResult; 
 }
