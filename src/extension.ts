@@ -398,7 +398,6 @@ export function activate(context: vscode.ExtensionContext) {
                 progress.report({ message: `Generating ${targets.length} descriptive comments...` });
                 const inserts: { line: number; text: string }[] = [];
 
-                let llmFallbackCount = 0;
                 let ruleFallbackCount = 0;
 
                 for (let i = 0; i < targets.length; i++) {
@@ -408,15 +407,11 @@ export function activate(context: vscode.ExtensionContext) {
 
                     let selectedComment: string;
 
-                    if (model.usedLlmFallback && !looksJargonLike(model.comment)) {
-                        // Secret tier: local LLM produced an acceptable comment
-                        selectedComment = normalizeSpace(model.comment);
-                        llmFallbackCount++;
-                    } else if (!model.usedFallback && !model.truncated && !looksJargonLike(model.comment)) {
+                    if (!model.usedFallback && !model.truncated && !looksJargonLike(model.comment)) {
                         // Primary model produced an acceptable comment
                         selectedComment = normalizeSpace(model.comment);
                     } else {
-                        // Final tier: deterministic rule-based fallback
+                        // Deterministic rule-based fallback
                         selectedComment = buildRuleBasedComment(target);
                         ruleFallbackCount++;
                     }
@@ -433,9 +428,6 @@ export function activate(context: vscode.ExtensionContext) {
                 });
 
                 const parts = [`Generated ${inserts.length} comments`];
-                if (llmFallbackCount > 0) {
-                    parts.push(`(${llmFallbackCount} via local LLM)`);
-                }
                 if (ruleFallbackCount > 0) {
                     parts.push(`(${ruleFallbackCount} via rules)`);
                 }

@@ -1,12 +1,12 @@
 {
     "enabled": true,
     "backend": "auto",
-    "ollama_base_url": "http://localhost:11434",
-    "ollama_model": "codellama:7b-instruct",
-    "gguf_model_path": "",
+    "endpoint_url": "http://localhost:11434",
+    "endpoint_model": "codellama:7b-instruct",
+    "native_model_path": "",
     "max_tokens": 64,
     "temperature": 0.3,
     "top_p": 0.9,
-    "timeout_seconds": 15,
-    "system_prompt": "You are a senior software engineer writing a single-line code comment. Given the code snippet below, produce exactly ONE concise comment sentence that describes the primary purpose of the code. Start with an action verb (e.g. Sorts, Validates, Loads, Filters). Do NOT use filler phrases like 'this code', 'here is', 'the function'. Do NOT use architectural jargon like 'orchestration boundary', 'domain orchestration'. Be specific to the actual logic."
+    "timeout": 15,
+    "instruction": "You are a senior software engineer reviewing a draft code comment. You are given the original code and a draft comment that was generated for it. Your job is to EDIT the draft comment to make it accurate, concise, and specific to the actual logic. Return ONLY the corrected single-sentence comment. Start with an action verb (e.g. Sorts, Validates, Loads, Filters). Do NOT use filler phrases like 'this code', 'here is', 'the function'. Do NOT use architectural jargon like 'orchestration boundary', 'domain orchestration'. Be specific to the actual logic. If the draft is already good, return it unchanged."
 }
