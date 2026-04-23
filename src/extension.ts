@@ -398,16 +398,29 @@ export function activate(context: vscode.ExtensionContext) {
                 progress.report({ message: `Generating ${targets.length} descriptive comments...` });
                 const inserts: { line: number; text: string }[] = [];
 
+                let llmFallbackCount = 0;
+                let ruleFallbackCount = 0;
+
                 for (let i = 0; i < targets.length; i++) {
                     const target = targets[i];
                     progress.report({ message: `Generating comment ${i + 1}/${targets.length}...` });
                     const model = await generateComment(compactSnippet(target.snippet), () => undefined);
-                    const fallbackComment = buildRuleBasedComment(target);
-                    
-                    const selectedComment = model.usedFallback || model.truncated || looksJargonLike(model.comment)
-                        ? fallbackComment
-                        : normalizeSpace(model.comment);
-                    
+
+                    let selectedComment: string;
+
+                    if (model.usedLlmFallback && !looksJargonLike(model.comment)) {
+                        // Secret tier: local LLM produced an acceptable comment
+                        selectedComment = normalizeSpace(model.comment);
+                        llmFallbackCount++;
+                    } else if (!model.usedFallback && !model.truncated && !looksJargonLike(model.comment)) {
+                        // Primary model produced an acceptable comment
+                        selectedComment = normalizeSpace(model.comment);
+                    } else {
+                        // Final tier: deterministic rule-based fallback
+                        selectedComment = buildRuleBasedComment(target);
+                        ruleFallbackCount++;
+                    }
+
                     const formatted = formatInlineComment(selectedComment, codeLang, target.indent);
                     inserts.push({ line: target.line, text: formatted });
                 }
@@ -418,8 +431,15 @@ export function activate(context: vscode.ExtensionContext) {
                         editBuilder.insert(new vscode.Position(insert.line, 0), insert.text);
                     }
                 });
-                
-                vscode.window.showInformationMessage(`Generated ${inserts.length} comments successfully.`);
+
+                const parts = [`Generated ${inserts.length} comments`];
+                if (llmFallbackCount > 0) {
+                    parts.push(`(${llmFallbackCount} via local LLM)`);
+                }
+                if (ruleFallbackCount > 0) {
+                    parts.push(`(${ruleFallbackCount} via rules)`);
+                }
+                vscode.window.showInformationMessage(`${parts.join(' ')} successfully.`);
             } catch (error: any) {
                 vscode.window.showErrorMessage(`Failed to generate comment: ${error.message}`);
                 console.error(error);

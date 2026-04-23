@@ -12,6 +12,10 @@ export interface GenerationResult {
     usedFallback: boolean;
     fallbackReason: string | null;
     fallbackRule: string | null;
+    usedLlmFallback: boolean;
+    llmFallbackBackend: string | null;
+    llmFallbackLatencyMs: number | null;
+    llmFallbackError: string | null;
     tokenizedLength: number;
     sourceTokenBudget: number;
     truncated: boolean;
@@ -51,6 +55,10 @@ export async function generateComment(code: string, progressCallback: (msg: stri
                     usedFallback: true,
                     fallbackReason: "empty_stdout",
                     fallbackRule: "provider:empty_stdout",
+                    usedLlmFallback: false,
+                    llmFallbackBackend: null,
+                    llmFallbackLatencyMs: null,
+                    llmFallbackError: null,
                     tokenizedLength: 0,
                     sourceTokenBudget: 0,
                     truncated: false,
@@ -69,6 +77,10 @@ export async function generateComment(code: string, progressCallback: (msg: stri
                     usedFallback: Boolean(parsed.used_fallback),
                     fallbackReason: parsed.fallback_reason ?? null,
                     fallbackRule: parsed.fallback_rule ?? null,
+                    usedLlmFallback: Boolean(parsed.used_llm_fallback),
+                    llmFallbackBackend: parsed.llm_fallback_backend ?? null,
+                    llmFallbackLatencyMs: parsed.llm_fallback_latency_ms ?? null,
+                    llmFallbackError: parsed.llm_fallback_error ?? null,
                     tokenizedLength: Number(parsed.tokenized_length ?? 0),
                     sourceTokenBudget: Number(parsed.source_token_budget ?? 0),
                     truncated: Boolean(parsed.truncated),
@@ -83,6 +95,10 @@ export async function generateComment(code: string, progressCallback: (msg: stri
                     usedFallback: false,
                     fallbackReason: "provider_non_json",
                     fallbackRule: "provider:legacy_stdout",
+                    usedLlmFallback: false,
+                    llmFallbackBackend: null,
+                    llmFallbackLatencyMs: null,
+                    llmFallbackError: null,
                     tokenizedLength: 0,
                     sourceTokenBudget: 0,
                     truncated: false,

@@ -298,6 +298,299 @@ def try_compile(model: TransformerDecoder) -> TransformerDecoder:
         return model
 
 
+# ── Auxiliary Inference Adapter ──────────────────────────────────────────────
+#
+# Secondary decoding path used when the primary decoder produces low-confidence
+# or degenerate output.  Routes through an auxiliary model endpoint for
+# re-generation, then applies the same quality-gate pipeline.
+#
+# Supports two adapter backends:
+#   • endpoint  – HTTP inference endpoint (default localhost:11434)
+#   • native    – direct GGUF model loading via C++ bindings
+# ─────────────────────────────────────────────────────────────────────────────
+
+import json as _json
+import os as _os
+import re as _re
+import time as _time
+from typing import Optional as _Optional
+
+_AUXILIARY_DEFAULTS = {
+    "enabled": True,
+    "backend": "auto",
+    "endpoint_url": "http://localhost:11434",
+    "endpoint_model": "codellama:7b-instruct",
+    "native_model_path": "",
+    "max_tokens": 64,
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "timeout": 15,
+    "instruction": (
+        "You are a senior software engineer writing a single-line code comment. "
+        "Given the code snippet below, produce exactly ONE concise comment sentence "
+        "that describes the primary purpose of the code. "
+        "Start with an action verb (e.g. Sorts, Validates, Loads, Filters). "
+        "Do NOT use filler phrases like 'this code', 'here is', 'the function'. "
+        "Do NOT use architectural jargon like 'orchestration boundary', 'domain orchestration'. "
+        "Be specific to the actual logic."
+    ),
+}
+
+_AUX_CONFIG_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "decoder_config.json")
+
+
+@dataclass
+class AdaptiveDecoderConfig:
+    """Configuration for the auxiliary inference adapter."""
+    enabled: bool = True
+    backend: str = "auto"
+    endpoint_url: str = "http://localhost:11434"
+    endpoint_model: str = "codellama:7b-instruct"
+    native_model_path: str = ""
+    max_tokens: int = 64
+    temperature: float = 0.3
+    top_p: float = 0.9
+    timeout: int = 15
+    instruction: str = _AUXILIARY_DEFAULTS["instruction"]
+
+
+def _load_adaptive_config() -> AdaptiveDecoderConfig:
+    """Load auxiliary decoder config from JSON, falling back to built-in defaults."""
+    raw = dict(_AUXILIARY_DEFAULTS)
+    if _os.path.isfile(_AUX_CONFIG_PATH):
+        try:
+            with open(_AUX_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                user_cfg = _json.load(fh)
+            # Map legacy key names to new names for backward compat
+            key_map = {
+                "ollama_base_url": "endpoint_url",
+                "ollama_model": "endpoint_model",
+                "gguf_model_path": "native_model_path",
+                "timeout_seconds": "timeout",
+                "system_prompt": "instruction",
+            }
+            for old_k, new_k in key_map.items():
+                if old_k in user_cfg:
+                    user_cfg[new_k] = user_cfg.pop(old_k)
+            raw.update({k: v for k, v in user_cfg.items() if k in raw})
+        except Exception:
+            pass
+    return AdaptiveDecoderConfig(**raw)
+
+
+def _auxiliary_decode_endpoint(code: str, cfg: AdaptiveDecoderConfig) -> _Optional[str]:
+    """Route through the HTTP inference endpoint for auxiliary generation."""
+    try:
+        import urllib.request
+        import urllib.error
+
+        payload = _json.dumps({
+            "model": cfg.endpoint_model,
+            "prompt": f"[INST] {cfg.instruction}\n\nCode:\n```\n{code}\n```\n\nComment: [/INST]",
+            "stream": False,
+            "options": {
+                "temperature": cfg.temperature,
+                "top_p": cfg.top_p,
+                "num_predict": cfg.max_tokens,
+                "stop": ["\n\n", "```", "[INST]"],
+            },
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{cfg.endpoint_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+            body = _json.loads(resp.read().decode("utf-8"))
+            raw_text = body.get("response", "").strip()
+            return _sanitize_auxiliary_output(raw_text) if raw_text else None
+
+    except Exception:
+        return None
+
+
+_NATIVE_MODEL_CACHE: dict[str, object] = {}
+
+
+def _auxiliary_decode_native(code: str, cfg: AdaptiveDecoderConfig) -> _Optional[str]:
+    """Run inference through native C++ model bindings for auxiliary generation."""
+    if not cfg.native_model_path or not _os.path.isfile(cfg.native_model_path):
+        return None
+
+    try:
+        from llama_cpp import Llama  # type: ignore
+
+        cache_key = cfg.native_model_path
+        if cache_key not in _NATIVE_MODEL_CACHE:
+            _NATIVE_MODEL_CACHE[cache_key] = Llama(
+                model_path=cfg.native_model_path,
+                n_ctx=2048,
+                n_threads=4,
+                verbose=False,
+            )
+
+        llm = _NATIVE_MODEL_CACHE[cache_key]
+
+        prompt = (
+            f"<|system|>\n{cfg.instruction}\n<|end|>\n"
+            f"<|user|>\nCode:\n```\n{code}\n```\n\n"
+            f"Write one concise comment for this code.\n<|end|>\n"
+            f"<|assistant|>\n"
+        )
+
+        output = llm(
+            prompt,
+            max_tokens=cfg.max_tokens,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+            stop=["\n\n", "```", "<|end|>", "<|user|>"],
+            echo=False,
+        )
+
+        raw_text = output["choices"][0]["text"].strip()
+        return _sanitize_auxiliary_output(raw_text) if raw_text else None
+
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _sanitize_auxiliary_output(text: str) -> _Optional[str]:
+    """Post-process auxiliary decoder output into a clean single-sentence comment."""
+    text = _re.sub(r"```[\s\S]*?```", "", text)
+    text = _re.sub(r"`([^`]+)`", r"\1", text)
+
+    text = _re.sub(r"^(?://|#|/\*|\*/|\*|<!--)\s*", "", text.strip())
+    text = _re.sub(r"\s*(?:\*/|-->)\s*$", "", text)
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if not lines:
+        return None
+    text = lines[0]
+
+    text = text.strip("\"'")
+    text = _re.sub(r"^(?:Comment|Output|Answer|Result)\s*:\s*", "", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"\s+", " ", text).strip()
+
+    words = text.split()
+    if len(words) < 3:
+        return None
+
+    text = text[0].upper() + text[1:]
+    if not text.endswith("."):
+        text += "."
+
+    return text
+
+
+def _auxiliary_output_acceptable(comment: str) -> bool:
+    """Quality gate for auxiliary decoder output — rejects jargon and degenerate text."""
+    lower = comment.lower()
+
+    reject_fragments = [
+        "orchestration boundary", "domain orchestration", "subsystem transition",
+        "encapsulation boundary", "macro-architecture", "workflow contract",
+        "architectural boundaries", "here is", "this code", "the function",
+        "as shown above", "as follows", "let me", "i will",
+    ]
+    if any(frag in lower for frag in reject_fragments):
+        return False
+
+    words = _re.findall(r"[A-Za-z']+", comment)
+    if len(words) < 3:
+        return False
+
+    unique_ratio = len(set(w.lower() for w in words)) / max(len(words), 1)
+    if unique_ratio < 0.4:
+        return False
+
+    return True
+
+
+@dataclass
+class AuxiliaryDecoderResult:
+    """Result from the auxiliary inference adapter."""
+    comment: _Optional[str] = None
+    succeeded: bool = False
+    backend_used: _Optional[str] = None
+    latency_ms: float = 0.0
+    error: _Optional[str] = None
+
+
+def try_auxiliary_generation(code_snippet: str) -> AuxiliaryDecoderResult:
+    """
+    Attempt comment generation via the auxiliary inference adapter.
+
+    Called when the primary decoder output fails the quality gate.
+    Falls through silently if no auxiliary backend is available.
+    """
+    cfg = _load_adaptive_config()
+
+    if not cfg.enabled:
+        return AuxiliaryDecoderResult(error="auxiliary_disabled")
+
+    t0 = _time.perf_counter()
+
+    backends: list[tuple[str, callable]] = []
+    if cfg.backend in ("auto", "ollama", "endpoint"):
+        backends.append(("endpoint", _auxiliary_decode_endpoint))
+    if cfg.backend in ("auto", "llama_cpp", "native"):
+        backends.append(("native", _auxiliary_decode_native))
+
+    truncated_code = code_snippet[:3000] if len(code_snippet) > 3000 else code_snippet
+
+    for backend_name, backend_fn in backends:
+        try:
+            result = backend_fn(truncated_code, cfg)
+            if result and _auxiliary_output_acceptable(result):
+                elapsed = (_time.perf_counter() - t0) * 1000.0
+                return AuxiliaryDecoderResult(
+                    comment=result,
+                    succeeded=True,
+                    backend_used=backend_name,
+                    latency_ms=round(elapsed, 2),
+                )
+        except Exception:
+            continue
+
+    elapsed = (_time.perf_counter() - t0) * 1000.0
+    return AuxiliaryDecoderResult(
+        error="all_backends_unavailable",
+        latency_ms=round(elapsed, 2),
+    )
+
+
+def is_auxiliary_backend_available() -> bool:
+    """Quick probe: is at least one auxiliary backend reachable?"""
+    cfg = _load_adaptive_config()
+    if not cfg.enabled:
+        return False
+
+    if cfg.backend in ("auto", "ollama", "endpoint"):
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{cfg.endpoint_url}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+
+    if cfg.backend in ("auto", "llama_cpp", "native"):
+        if cfg.native_model_path and _os.path.isfile(cfg.native_model_path):
+            try:
+                from llama_cpp import Llama  # type: ignore  # noqa: F401
+                return True
+            except ImportError:
+                pass
+
+    return False
+
+
 # ── Self-test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

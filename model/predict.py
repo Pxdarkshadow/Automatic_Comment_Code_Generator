@@ -34,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 from model import TransformerConfig, TransformerDecoder, try_compile
+from model import try_auxiliary_generation, AuxiliaryDecoderResult
 from dataset import BPETokenizer, FormattingPipe, PAD_TOKEN, EOS_TOKEN, UNK_TOKEN
 
 # ── Decode Configuration ─────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ class DecodeConfig:
     num_return_sequences: int = 4
     length_alpha: float = 0.7
     use_cache: bool = True
+    enable_llm_fallback: bool = True   # Secret local LLM fallback tier
 
 
 # ── System Instruction ───────────────────────────────────────────────────────
@@ -733,10 +735,23 @@ def predict_with_meta(
         reason = "model_inference_failed"
     fallback_rule = None
     used_fallback = False
+    aux_result: AuxiliaryDecoderResult | None = None
+    used_auxiliary = False
 
     if low_quality or not model_ready or decode_error is not None:
-        best_text, fallback_rule = _build_descriptive_fallback(code_snippet)
-        used_fallback = True
+        # ── AUXILIARY TIER: Try secondary decoder before deterministic rules
+        if cfg.enable_llm_fallback:
+            aux_result = try_auxiliary_generation(code_snippet)
+            if aux_result.succeeded and aux_result.comment:
+                best_text = aux_result.comment
+                used_auxiliary = True
+                used_fallback = True
+                fallback_rule = f"aux:{aux_result.backend_used}"
+
+        # ── FINAL TIER: Deterministic rule-based fallback ────────────────
+        if not used_auxiliary:
+            best_text, fallback_rule = _build_descriptive_fallback(code_snippet)
+            used_fallback = True
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
     telemetry = {
@@ -745,6 +760,10 @@ def predict_with_meta(
         "used_fallback": used_fallback,
         "fallback_reason": reason if used_fallback else None,
         "fallback_rule": fallback_rule,
+        "used_llm_fallback": used_auxiliary,
+        "llm_fallback_backend": aux_result.backend_used if aux_result else None,
+        "llm_fallback_latency_ms": aux_result.latency_ms if aux_result else None,
+        "llm_fallback_error": aux_result.error if aux_result else None,
         "tokenized_length": len(prompt_ids),
         "source_token_budget": max_prompt,
         "truncated": truncated,
@@ -779,6 +798,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--length-alpha", type=float, default=0.7)
     parser.add_argument("--repetition-penalty", type=float, default=1.3)
     parser.add_argument("--no-cache", dest="use_cache", action="store_false", default=True)
+    parser.add_argument("--no-llm-fallback", dest="enable_llm_fallback", action="store_false", default=True,
+                        help="Disable the secret local LLM fallback tier")
     return parser.parse_args()
 
 
@@ -808,6 +829,7 @@ if __name__ == "__main__":
         length_alpha=args.length_alpha,
         repetition_penalty=args.repetition_penalty,
         use_cache=args.use_cache,
+        enable_llm_fallback=args.enable_llm_fallback,
     )
 
     output = predict_with_meta(code_input, config=config)
