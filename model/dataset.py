@@ -764,6 +764,15 @@ def build_dataset(
     print(f"  Repo-aware train samples: {len(train_records)}")
     print(f"  Repo-aware val samples  : {len(val_records)}")
 
+    # Phase 1B.1: repo leakage check — zero code-level overlap between train/val
+    train_code_hashes = {_normalize_code_key(s.code) for s in train_records}
+    val_code_hashes = {_normalize_code_key(s.code) for s in val_records}
+    code_leakage = train_code_hashes & val_code_hashes
+    if code_leakage:
+        print(f"  [WARNING] Code leakage: {len(code_leakage)} hashes overlap between train/val")
+    else:
+        print(f"  [OK] Zero code-level leakage between train and val")
+
     corpus = [FormattingPipe.format_train(sample.code, sample.comment) for sample in deduped_samples]
     tokenizer = BPETokenizer()
     tokenizer.train(corpus, target_vocab_size=bpe_vocab_size)
@@ -814,6 +823,7 @@ def build_dataset(
         "max_seq_len": max_seq_len,
         "source_breakdown": source_breakdown,
         "language_breakdown": language_breakdown,
+        "code_leakage_count": len(code_leakage),
     }
 
     print("\n=== Dataset ready ===")

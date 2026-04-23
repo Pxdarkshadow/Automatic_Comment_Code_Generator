@@ -1,0 +1,66 @@
+{
+  "baseline_id": "baseline_v48_20260421",
+  "description": "Frozen baseline for max-accuracy experiment series. All future runs are compared against these numbers.",
+  "frozen_at": "2026-04-23T03:47:00+05:30",
+  "architecture": {
+    "type": "Decoder-only Transformer (GPT-style)",
+    "n_layers": 4,
+    "d_model": 384,
+    "n_heads": 6,
+    "d_ff": 1536,
+    "dropout": 0.15,
+    "vocab_size": 8192,
+    "max_seq_len": 512,
+    "trainable_params": 10238208,
+    "weight_tying": true
+  },
+  "hyperparameters": {
+    "learning_rate": 0.0001,
+    "weight_decay": 0.05,
+    "warmup_steps": 500,
+    "batch_size": 48,
+    "optimizer": "AdamW",
+    "lr_scheduler": "LinearWarmupCosineDecay",
+    "clip_grad_norm": 1.0,
+    "comment_loss_weight": 2.2,
+    "label_smoothing": 0.1,
+    "validation_split": 0.15,
+    "early_stopping_patience": 10,
+    "seed": 42
+  },
+  "dataset": {
+    "sources": ["codesearchnet", "codexglue"],
+    "languages": ["python", "java", "javascript", "go", "php", "ruby"],
+    "raw_samples": 96000,
+    "duplicates_removed": 1938,
+    "deduplicated_samples": 94062,
+    "train_samples": 79945,
+    "val_samples": 14117,
+    "validation_strategy": "repo_aware_group_split"
+  },
+  "best_metrics": {
+    "best_val_loss": 0.855630,
+    "best_val_loss_epoch": 45,
+    "best_val_f1": 0.916437,
+    "best_val_f1_epoch": 48,
+    "best_bleu4": 0.0,
+    "note": "BLEU-4 was always 0.0 due to a bug (no smoothing + sparse computation). Fixed in Phase 1A."
+  },
+  "anomalies": {
+    "epoch_47_to_48_jump": {
+      "description": "val_loss jumped from 0.856 to 2.097 between epoch 47 and 48 while F1 continued rising. This indicates the checkpoint was resumed against a re-built dataset or tokenizer.",
+      "val_loss_before": 0.855630,
+      "val_loss_after": 2.096731,
+      "action": "Phase 0 locks the baseline to prevent this from recurring."
+    }
+  },
+  "checkpoint": {
+    "path": "checkpoints/checkpoint.pt",
+    "total_epochs_trained": 48
+  },
+  "tokenizer": {
+    "path": "bpe_vocab.json",
+    "type": "BPE",
+    "vocab_size": 8192
+  }
+}

@@ -12,6 +12,7 @@ Orchestrates:
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import math
@@ -71,6 +72,7 @@ CKPT_DIR  = os.path.join(SAVE_DIR, "checkpoints")
 os.makedirs(CKPT_DIR, exist_ok=True)
 CKPT_PATH = os.path.join(CKPT_DIR, "checkpoint.pt")
 LOG_PATH  = os.path.join(SAVE_DIR, "telemetry_log.json")
+REGISTRY_PATH = os.path.join(SAVE_DIR, "experiment_registry.jsonl")
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
@@ -81,6 +83,11 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # Phase 0: deterministic mode for strict reproducibility
+    if os.getenv("DETERMINISTIC", "") == "1":
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
 def make_batches(
@@ -243,6 +250,7 @@ def compute_bleu(
         return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
 
     def sentence_bleu(ref: list[str], hyp: list[str], max_n: int = 4) -> float:
+        """Sentence-level BLEU with add-1 smoothing for n>1 (fixes BLEU=0.0 bug)."""
         if len(hyp) == 0:
             return 0.0
         scores = []
@@ -251,7 +259,11 @@ def compute_bleu(
             hyp_ng = Counter(ngrams(hyp, n))
             clipped = sum(min(hyp_ng[g], ref_ng[g]) for g in hyp_ng)
             total = max(sum(hyp_ng.values()), 1)
-            scores.append(clipped / total)
+            # Add-1 smoothing for n > 1 to avoid zero on short references
+            if n == 1:
+                scores.append(clipped / total)
+            else:
+                scores.append((clipped + 1) / (total + 1))
         if any(s == 0 for s in scores):
             return 0.0
         log_avg = sum(math.log(s) for s in scores) / len(scores)
@@ -515,6 +527,12 @@ def run_pipeline():
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             last_grad_norm = compute_grad_norm(model)
+
+            # Phase 0: stability assertions
+            assert not torch.isnan(loss), f"NaN loss at epoch {global_epoch} step {step}"
+            assert not torch.isinf(loss), f"Inf loss at epoch {global_epoch} step {step}"
+            assert last_grad_norm < 100.0, f"Gradient explosion ({last_grad_norm:.2f}) at epoch {global_epoch} step {step}"
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
             scaler.step(optimizer)
             scaler.update()
@@ -599,10 +617,8 @@ def run_pipeline():
         avg_val_loss = val_loss_sum / max(n_val_batches, 1)
         avg_val_ppl = math.exp(min(avg_val_loss, 100))
 
-        # ── BLEU ─────────────────────────────────────────────────────────
-        bleu_score = 0.0
-        if epoch % 3 == 0 or epoch == CONTINUE_EPOCHS:
-            bleu_score = compute_bleu(model, val_seqs, tokenizer, device)
+        # ── BLEU (computed every epoch for reliable tracking) ────────
+        bleu_score = compute_bleu(model, val_seqs, tokenizer, device)
 
         current_lr = scheduler.lr
         epoch_time = time.time() - epoch_start
@@ -694,8 +710,33 @@ def run_pipeline():
     print(f"  Plots Output  : {plot_path}")
     print()
 
+    # Phase 0: append to experiment registry
+    registry_entry = {
+        "experiment_tag": telemetry.get("experiment_tag", telemetry["experiment_id"]),
+        "timestamp": datetime.datetime.now().isoformat(),
+        "architecture": {"n_layers": N_LAYERS, "d_model": D_MODEL, "n_heads": N_HEADS, "d_ff": D_FF},
+        "hyperparameters": {"lr": LEARNING_RATE, "batch_size": BATCH_SIZE, "comment_loss_weight": COMMENT_LOSS_WEIGHT, "label_smoothing": LABEL_SMOOTHING, "warmup_steps": WARMUP_STEPS},
+        "best_val_loss": round(best_val_loss, 6),
+        "best_val_f1": round(max((e["val_f1"] for e in telemetry["epochs"]), default=0), 6),
+        "best_bleu4": round(max((e["bleu_4"] for e in telemetry["epochs"]), default=0), 6),
+        "total_epochs": telemetry.get("total_epochs_run", 0),
+        "status": "completed",
+    }
+    with open(REGISTRY_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(registry_entry, ensure_ascii=True) + "\n")
+
     return LOG_PATH
 
 
+def _parse_train_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the code-comment Transformer")
+    parser.add_argument("--experiment-tag", default=None, help="Short tag for this experiment run")
+    parser.add_argument("--deterministic", action="store_true", help="Enable strict deterministic mode")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_train_args()
+    if args.deterministic:
+        os.environ["DETERMINISTIC"] = "1"
     run_pipeline()
