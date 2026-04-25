@@ -47,10 +47,10 @@ class DecodeConfig:
     beam_width: int = 6
     top_k: int = 50
     top_p: float = 0.90
-    temperature: float = 0.85
-    repetition_penalty: float = 1.35
+    temperature: float = 0.2
+    repetition_penalty: float = 1.05
     num_return_sequences: int = 4
-    length_alpha: float = 0.7
+    length_alpha: float = 0.0
     use_cache: bool = True
 
 
@@ -781,11 +781,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--beam-width", type=int, default=6)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--temperature", type=float, default=0.65)
+    parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--min-len", type=int, default=8)
     parser.add_argument("--max-len", type=int, default=48)
-    parser.add_argument("--length-alpha", type=float, default=0.7)
-    parser.add_argument("--repetition-penalty", type=float, default=1.3)
+    parser.add_argument("--length-alpha", type=float, default=0.0)
+    parser.add_argument("--repetition-penalty", type=float, default=1.05)
     parser.add_argument("--no-cache", dest="use_cache", action="store_false", default=True)
 
     return parser.parse_args()

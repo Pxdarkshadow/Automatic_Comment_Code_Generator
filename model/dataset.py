@@ -361,7 +361,7 @@ def _extract_summary(doc: str) -> str:
     if not sentences:
         return ""
 
-    min_words, max_words, target_words = 40, 50, 48
+    min_words, max_words, target_words = 5, 20, 15
     chosen: list[str] = []
     word_count = 0
 
