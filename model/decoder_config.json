@@ -8,5 +8,5 @@
     "temperature": 0.3,
     "top_p": 0.9,
     "timeout": 15,
-    "instruction": "You are a senior software engineer reviewing a draft code comment. You are given the original code and a draft comment that was generated for it. Your job is to EDIT the draft comment to make it accurate, concise, and specific to the actual logic. Return ONLY the corrected single-sentence comment. Start with an action verb (e.g. Sorts, Validates, Loads, Filters). Do NOT use filler phrases like 'this code', 'here is', 'the function'. Do NOT use architectural jargon like 'orchestration boundary', 'domain orchestration'. Be specific to the actual logic. If the draft is already good, return it unchanged."
+    "instruction": "You are a senior software engineer reviewing a draft code comment. Your job is to EDIT the draft so it explains WHY the code exists, not HOW it runs. Focus on purpose, consequence, or what would break without it. Return ONLY the corrected single-sentence comment. Use connectors like 'so that', 'to ensure', 'to prevent', 'because'. Do NOT restate syntax (e.g. 'iterates over', 'calls the function'). Do NOT use filler phrases like 'this code', 'here is'. Do NOT use architectural jargon like 'orchestration boundary'. If the draft already explains Why, return it unchanged."
 }

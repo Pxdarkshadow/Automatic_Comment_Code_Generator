@@ -58,22 +58,23 @@ class DecodeConfig:
 # ── System Instruction ───────────────────────────────────────────────────────
 
 SYSTEM_INSTRUCTION = (
-    "Generate one concise code comment sentence.\n"
-    "Write like a strong small code assistant, not a consultant.\n"
-    "Describe the primary purpose of the code and the most important behavior or outcome.\n"
+    "Generate one concise code comment sentence that explains WHY the code exists.\n"
+    "Do NOT describe how the code runs or restate the syntax.\n"
+    "Instead, explain the purpose, the consequence if removed, or the business reason.\n"
     "The code element may be a function, loop, logic block, or variable assignment.\n"
-    "For loops: describe what is iterated and what the loop accumulates, filters, or produces.\n"
-    "For logic blocks: describe the branching condition and the cases handled.\n"
-    "For variable assignments: describe what the variable holds and why it matters.\n"
-    "Prefer concrete actions such as sorting, validating, formatting, loading, filtering, merging, or rendering.\n"
-    "Be specific to the snippet and mention inputs, outputs, ordering, or side effects when they are obvious.\n"
-    "Avoid filler and avoid vague architectural jargon.\n"
+    "For loops: explain what depends on the loop's output, not that it iterates.\n"
+    "For logic blocks: explain what is protected or what would fail without the check.\n"
+    "For variable assignments: explain what downstream code depends on this value.\n"
+    "Good: 'Rejects malformed input early to prevent parsing failures downstream.'\n"
+    "Bad:  'Iterates over the list and checks each element.'\n"
+    "Good: 'Pre-sorts results so the UI displays the most urgent items first.'\n"
+    "Bad:  'Sorts the array in ascending order.'\n"
     "Output requirements:\n"
     "1. Produce exactly one sentence.\n"
-    "2. Start directly with the action, such as 'Sorts', 'Validates', 'Loads', 'Iterates', 'Stores', or 'Guards'.\n"
-    "3. Do not use filler phrases such as 'this code', 'here is', or 'the function'.\n"
-    "4. Do not repeat the function name unless it adds useful meaning.\n"
-    "5. Avoid phrases such as orchestration boundary, subsystem transition, encapsulation boundary, or domain orchestration.\n"
+    "2. Focus on WHY, not HOW.\n"
+    "3. Use phrases like 'so that', 'to ensure', 'to prevent', 'because', 'before'.\n"
+    "4. Do not use filler phrases such as 'this code', 'here is', or 'the function'.\n"
+    "5. Avoid architectural jargon like orchestration boundary, subsystem transition.\n"
 )
 
 
@@ -494,50 +495,49 @@ def _extract_intents(code: str) -> list[str]:
 
 
 def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple[str, str]:
-    """Generate a deterministic code-relevant comment when the model is unavailable or low-quality."""
+    """Generate a deterministic purpose-driven comment explaining WHY the code exists."""
     code_lower = code.lower()
 
     # ── Loop fallback ────────────────────────────────────────────────────
     if code_type == "loop":
         if any(k in code_lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
-            return ("Iterates to accumulate a running total.", "intent:loop_accumulate")
+            return ("Computes the aggregate so downstream calculations have the total they need.", "intent:loop_accumulate")
         if any(k in code_lower for k in ["filter", "append", "push", "add("]):
-            return ("Iterates to collect elements matching the criteria.", "intent:loop_filter")
+            return ("Isolates qualifying items so only valid entries proceed to the next step.", "intent:loop_filter")
         if any(k in code_lower for k in ["max(", "min(", "largest", "smallest"]):
-            return ("Iterates to find the extreme value.", "intent:loop_extreme")
+            return ("Identifies the boundary value the caller requires for its decision.", "intent:loop_extreme")
         if any(k in code_lower for k in ["sort", "swap", "compare"]):
-            return ("Iterates to reorder elements.", "intent:loop_sort")
+            return ("Establishes the correct ordering before the result is consumed.", "intent:loop_sort")
         if any(k in code_lower for k in ["print(", "log(", "write("]):
-            return ("Iterates to output each element.", "intent:loop_output")
-        # Extract iterable
+            return ("Emits each record so progress is observable and auditable.", "intent:loop_output")
         for_match = re.search(r"for\s+\w+\s+in\s+(.+?)\s*[:{]", code)
         if for_match:
             collection = for_match.group(1).strip().rstrip(":")
-            return (f"Iterates over {collection} and processes each element.", "intent:loop_iterate")
+            return (f"Walks {collection} to prepare the dataset for the operation that follows.", "intent:loop_iterate")
         while_match = re.search(r"while\s+(.+?)\s*[:{]", code)
         if while_match:
             condition = while_match.group(1).strip().rstrip(":")
-            return (f"Continues processing while {condition}.", "intent:loop_while")
-        return ("Iterates through the collection and processes each element.", "intent:loop_generic")
+            return (f"Keeps running while {condition} because the task is not yet complete.", "intent:loop_while")
+        return ("Prepares the dataset for the operation that follows.", "intent:loop_generic")
 
     # ── Complex logic fallback ───────────────────────────────────────────
     if code_type == "complex_logic":
         if any(k in code_lower for k in ["valid", "check", "assert", "schema", "required"]):
-            return ("Validates the input and rejects invalid cases.", "intent:logic_validate")
+            return ("Rejects malformed input early to prevent downstream parsing failures.", "intent:logic_validate")
         if any(k in code_lower for k in ["error", "except", "catch", "raise", "throw"]):
-            return ("Handles error conditions with recovery logic.", "intent:logic_error")
+            return ("Contains failures gracefully so the caller receives a clear error signal.", "intent:logic_error")
         if any(k in code_lower for k in ["permission", "auth", "role", "access"]):
-            return ("Enforces access control based on permissions.", "intent:logic_auth")
+            return ("Restricts access to authorized users before any state changes occur.", "intent:logic_auth")
         if any(k in code_lower for k in ["type(", "isinstance", "typeof", "switch", "match"]):
-            return ("Dispatches to the handler based on type.", "intent:logic_dispatch")
+            return ("Routes to the correct handler because each type requires different processing.", "intent:logic_dispatch")
         if any(k in code_lower for k in ["retry", "attempt", "fallback", "timeout"]):
-            return ("Implements retry logic with fallback.", "intent:logic_retry")
+            return ("Tolerates transient failures by retrying before giving up.", "intent:logic_retry")
         if any(k in code_lower for k in ["null", "none", "undefined", "empty"]):
-            return ("Guards against null or missing values.", "intent:logic_guard")
+            return ("Prevents null-reference errors that would crash the caller.", "intent:logic_guard")
         branch_count = code_lower.count("elif") + code_lower.count("else if") + code_lower.count("case ")
         if branch_count >= 2:
-            return (f"Branches across {branch_count + 1} cases based on the condition.", "intent:logic_branch")
-        return ("Selects the execution path based on the condition.", "intent:logic_generic")
+            return (f"Handles {branch_count + 1} distinct scenarios that each require different treatment.", "intent:logic_branch")
+        return ("Chooses the correct path because the outcome differs by condition.", "intent:logic_generic")
 
     # ── Variable fallback ────────────────────────────────────────────────
     if code_type == "variable":
@@ -546,61 +546,61 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
             var_name = var_match.group(1)
             rhs = var_match.group(2).lower()
             if any(k in rhs for k in ["config", "setting", "option", "param", "env"]):
-                return (f"{var_name}: configuration value controlling downstream behavior.", "intent:var_config")
+                return (f"{var_name}: captures the configuration that governs how the pipeline behaves.", "intent:var_config")
             if any(k in rhs for k in ["connect", "client", "session", "pool", "socket"]):
-                return (f"{var_name}: connection handle for subsequent operations.", "intent:var_connection")
+                return (f"{var_name}: establishes the connection all subsequent calls depend on.", "intent:var_connection")
             if any(k in rhs for k in ["query", "sql", "select", "cursor"]):
-                return (f"{var_name}: query result driving the processing logic.", "intent:var_query")
+                return (f"{var_name}: fetches the data that the remaining logic transforms and returns.", "intent:var_query")
             if any(k in rhs for k in ["request", "response", "fetch", "api", "http"]):
-                return (f"{var_name}: API response data for further processing.", "intent:var_api")
+                return (f"{var_name}: retrieves the external data needed before processing can continue.", "intent:var_api")
             if any(k in rhs for k in ["path", "file", "dir", "url", "uri"]):
-                return (f"{var_name}: resource path for file or network access.", "intent:var_path")
-            return (f"{var_name}: computed value used in the subsequent logic.", "intent:var_computed")
-        return ("Stores a critical intermediate value.", "intent:var_generic")
+                return (f"{var_name}: resolves the target location so readers and writers operate correctly.", "intent:var_path")
+            return (f"{var_name}: stores a value that later steps depend on.", "intent:var_computed")
+        return ("Stores a critical intermediate value that later steps depend on.", "intent:var_generic")
 
-    # ── Function/class fallback (original logic) ─────────────────────────
+    # ── Function/class fallback (purpose-driven) ─────────────────────────
     function_name = _extract_function_name(code) or "System"
     lower_name = function_name.lower()
 
     if "merge_sort" in lower_name or ("sort" in lower_name and "mid" in code_lower and "len(" in code_lower):
         return (
-            "Sorts the list using merge sort.",
+            "Establishes the correct ordering so consumers receive results in the expected sequence.",
             "intent:merge_sort",
         )
 
     if any(token in code_lower for token in ["quick_sort", "quicksort", "pivot"]) and "sort" in lower_name:
         return (
-            "Sorts the list using quick sort.",
+            "Establishes the correct ordering so consumers receive results in the expected sequence.",
             "intent:quick_sort",
         )
 
     if any(token in code_lower for token in ["binary_search", "mid", "left", "right"]) and "search" in lower_name:
         return (
-            "Searches for the target using binary search.",
+            "Locates the target efficiently to satisfy the lookup request.",
             "intent:binary_search",
         )
 
     if any(token in code_lower for token in ["auth", "login", "token", "credential", "session", "oauth"]):
         return (
-            "Authenticates the user or request.",
+            "Verifies identity so only authorized users can proceed.",
             "intent:auth_flow",
         )
 
     if any(token in code_lower for token in ["api", "http", "request", "response", "client", "endpoint", "network", "fetch("]):
         return (
-            "Makes a network request or handles an API call.",
+            "Retrieves external data needed before the next processing step can run.",
             "intent:api_fetch",
         )
 
     if any(token in code_lower for token in ["cache", "store", "db", "database", "repository", "persist", "save", "load", "read(", "write("]):
         return (
-            "Reads or writes data to storage.",
+            "Persists or retrieves data so state survives across invocations.",
             "intent:data_persistence",
         )
 
     if any(token in code_lower for token in ["react", "jsx", "tsx", "component", "view", "screen", "render", "chart", "table"]):
         return (
-            "Renders the user interface component.",
+            "Renders the UI so the user can see and interact with the current state.",
             "intent:ui_rendering",
         )
 
@@ -612,21 +612,21 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
     intents = _extract_intents(code)
 
     if any(token in lower_name for token in ["sort", "order", "rank"]):
-        return (f"Sorts{param_phrase}.", "intent:sorting")
+        return (f"Establishes the correct ordering so the consumer receives results in the expected sequence.", "intent:sorting")
     if any(token in lower_name for token in ["filter", "select", "match"]):
-        return (f"Filters{param_phrase}.", "intent:filtering")
+        return (f"Isolates qualifying entries so only valid items proceed.", "intent:filtering")
     if any(token in lower_name for token in ["validate", "check", "verify"]):
-        return (f"Validates{param_phrase}.", "intent:validation")
+        return (f"Rejects invalid{param_phrase} early to prevent downstream errors.", "intent:validation")
     if any(token in lower_name for token in ["format", "parse", "convert", "normalize", "transform"]):
-        return (f"Transforms{param_phrase}.", "intent:data_transformation")
+        return (f"Reshapes{param_phrase} into the format expected by the consumer.", "intent:data_transformation")
     if any(token in lower_name for token in ["load", "fetch", "read", "save", "write"]):
-        return (f"Loads or saves data.", "intent:data_flow")
+        return (f"Persists or retrieves data so state survives across invocations.", "intent:data_flow")
     if any(token in lower_name for token in ["render", "view", "list", "table", "card", "item"]):
-        return ("Renders the view.", "intent:ui_rendering")
+        return ("Renders the UI so the user can see and interact with the data.", "intent:ui_rendering")
     if "aggregation" in intents:
-        return ("Calculates an aggregate value.", "intent:aggregation")
+        return ("Computes the aggregate needed by the caller.", "intent:aggregation")
 
-    return (f"Processes{param_phrase}.", "intent:concise_summary")
+    return (f"Processes{param_phrase} to produce the result the caller depends on.", "intent:concise_summary")
 
 
 def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "function") -> tuple[bool, str | None]:
@@ -704,22 +704,44 @@ def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "func
     if any(fragment in text.lower() for fragment in bad_fragments):
         return True, "boilerplate"
 
+    # ── Syntax-Only Detection ────────────────────────────────────────────
+    # Reject comments that merely restate what the code does mechanically.
+    syntax_only_patterns = [
+        re.compile(r"^(iterates?|loops?|cycles?)\s+(over|through|across)\s+.{3,40}\.?\s*$", re.IGNORECASE),
+        re.compile(r"^(calls?|invokes?|runs?|executes?)\s+(the|a)?\s*\w+(\s+\w+){0,3}\.?\s*$", re.IGNORECASE),
+        re.compile(r"^(assigns?|sets?)\s+.{2,30}\s+to\s+.{2,30}\.?\s*$", re.IGNORECASE),
+        re.compile(r"^creates?\s+(a\s+)?new\s+\w+(\s+\w+){0,3}\.?\s*$", re.IGNORECASE),
+    ]
+    for pattern in syntax_only_patterns:
+        if pattern.match(text.strip()):
+            return True, "syntax_only"
+
     return False, None
 
 
 def _score_comment_text(comment: str, code: str) -> float:
-    """Heuristic re-ranking score for candidate comments."""
+    """Heuristic re-ranking score for candidate comments, preferring 'Why' over 'How'."""
     lower = comment.lower()
     score = 0.0
 
+    # Reward purpose-driven phrasing ("Why" connectors)
+    if any(w in lower for w in ["so that", "to ensure", "to prevent", "because", "before ",
+                                 "to avoid", "so the", "so only", "needed by", "depends on",
+                                 "required by", "expected by", "survives", "without this"]):
+        score += 2.0
+
+    # Moderate reward for action verbs with consequence context
     if any(w in lower for w in ["sort", "filter", "validate", "format", "parse", "load", "save", "merge", "render", "return"]):
-        score += 1.5
-    if any(w in lower for w in ["compute", "parse", "filter", "sort", "validate", "load", "save"]):
-        score += 1.2
+        score += 1.0
+
+    # Penalize pure syntax restatements
     if any(bad in lower for bad in ["this code", "code block", "selected logic"]):
-        score -= 1.0
+        score -= 1.5
     if any(bad in lower for bad in ["orchestration boundary", "domain orchestration", "subsystem", "macro-architecture"]):
-        score -= 1.2
+        score -= 1.5
+    # Penalize mechanical descriptions that lack purpose
+    if re.match(r"^(iterates?|loops?|calls?|creates?)\s+", lower) and "to " not in lower and "so " not in lower:
+        score -= 1.0
 
     name = _extract_function_name(code)
     if name and name.lower() in lower:
@@ -731,7 +753,7 @@ def _score_comment_text(comment: str, code: str) -> float:
 
     intents = _extract_intents(code)
     if any(intent.split()[0] in lower for intent in intents):
-        score += 0.6
+        score += 0.4
     return score
 
 

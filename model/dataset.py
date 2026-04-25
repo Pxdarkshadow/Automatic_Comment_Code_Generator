@@ -67,6 +67,42 @@ SYNTACTIC_ECHO_PATTERNS = [
     re.compile(r"^[A-Z][a-z]+s?\s+\w+\.?\s*$"),
 ]
 
+# ── Syntax-Only Filters (reject "How" comments that lack "Why" reasoning) ────
+# These patterns catch comments that mechanically describe code operations
+# without explaining the purpose, consequence, or business reason.
+SYNTAX_ONLY_PATTERNS = [
+    # "Iterates over X" / "Loops through Y" with no stated purpose
+    re.compile(
+        r"^(iterates?|loops?|cycles?)\s+(over|through|across)\s+.{3,40}\.?\s*$",
+        re.IGNORECASE,
+    ),
+    # "Calls X" / "Invokes Y" — merely naming what's called
+    re.compile(
+        r"^(calls?|invokes?|runs?|executes?)\s+(the|a)?\s*\w+(\s+\w+){0,3}\.?\s*$",
+        re.IGNORECASE,
+    ),
+    # "Assigns X to Y" / "Sets X to Y" — restating the assignment
+    re.compile(
+        r"^(assigns?|sets?)\s+.{2,30}\s+to\s+.{2,30}\.?\s*$",
+        re.IGNORECASE,
+    ),
+    # "Creates a new X" with no context for why
+    re.compile(
+        r"^creates?\s+(a\s+)?new\s+\w+(\s+\w+){0,3}\.?\s*$",
+        re.IGNORECASE,
+    ),
+    # "Adds X to Y" / "Appends X to Y" — pure mechanics
+    re.compile(
+        r"^(adds?|appends?|inserts?|pushes?)\s+.{2,30}\s+(to|into)\s+.{2,30}\.?\s*$",
+        re.IGNORECASE,
+    ),
+    # "Checks if X" without stating consequence — single-clause guards
+    re.compile(
+        r"^checks?\s+if\s+.{3,40}\.?\s*$",
+        re.IGNORECASE,
+    ),
+]
+
 BOILERPLATE_PATTERNS = [
     re.compile(r"(?i)\b(see also|@deprecated|@since|@version|@author)\b"),
     re.compile(r"(?i)^(this (method|function|class)|the following)"),
@@ -417,6 +453,9 @@ def _looks_human_language(text: str) -> bool:
     for pattern in SYNTACTIC_ECHO_PATTERNS:
         if pattern.match(text.strip()):
             return False
+    for pattern in SYNTAX_ONLY_PATTERNS:
+        if pattern.match(text.strip()):
+            return False
     for pattern in BOILERPLATE_PATTERNS:
         if pattern.search(text):
             return False
@@ -682,69 +721,69 @@ def _extract_block(lines: list[str], start_idx: int, base_indent: int, is_brace_
 
 
 def _detect_loop_intent(block_text: str) -> str:
-    """Infer the purpose of a loop from its body."""
+    """Infer the business purpose of a loop — why it exists, not what it does."""
     lower = block_text.lower()
     if any(k in lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
-        return "accumulates a running total"
+        return "compute the aggregate needed for downstream calculations"
     if any(k in lower for k in ["filter", "if ", "append", "push", "add("]):
-        return "collects items that match the selection criteria"
+        return "isolate qualifying items so only valid entries proceed"
     if any(k in lower for k in ["max(", "min(", "largest", "smallest", "best"]):
-        return "finds the extreme value across the collection"
+        return "identify the boundary value required by the caller"
     if any(k in lower for k in ["transform", "map(", "convert", "format"]):
-        return "transforms each element into the required format"
+        return "normalize each element into the shape expected by the consumer"
     if any(k in lower for k in ["print(", "log(", "write(", "output"]):
-        return "processes and outputs each element"
+        return "emit each record so progress is observable and auditable"
     if any(k in lower for k in ["index", "search", "find", "locate"]):
-        return "searches for a target element in the collection"
+        return "locate the target entry to satisfy the lookup request"
     if any(k in lower for k in ["sort", "swap", "compare"]):
-        return "reorders elements according to the comparison logic"
+        return "establish the correct ordering before the result is consumed"
     if any(k in lower for k in ["yield", "next(", "iter"]):
-        return "generates values lazily from the source"
-    return "processes each element in the collection"
+        return "produce values on demand to avoid loading everything into memory"
+    return "prepare the dataset for the operation that follows"
 
 
 def _detect_logic_intent(block_text: str) -> str:
-    """Infer the purpose of a complex logic block."""
+    """Infer why a complex logic block exists — its protective or routing purpose."""
     lower = block_text.lower()
     if any(k in lower for k in ["valid", "check", "assert", "schema", "required"]):
-        return "validates the input and rejects invalid cases"
+        return "reject malformed input early to prevent downstream failures"
     if any(k in lower for k in ["error", "except", "catch", "raise", "throw"]):
-        return "handles error conditions and recovery"
+        return "contain failures gracefully so the caller receives a clear signal"
     if any(k in lower for k in ["permission", "auth", "role", "access"]):
-        return "enforces access control based on permissions"
+        return "restrict access to authorized users before any state changes occur"
     if any(k in lower for k in ["type(", "isinstance", "typeof", "switch", "match"]):
-        return "dispatches to the correct handler based on type"
+        return "route to the correct handler because each type requires different processing"
     if any(k in lower for k in ["retry", "attempt", "fallback", "timeout"]):
-        return "implements retry logic with fallback handling"
+        return "tolerate transient failures by retrying before giving up"
     if any(k in lower for k in ["null", "none", "undefined", "empty"]):
-        return "guards against null or missing values"
+        return "prevent null-reference errors that would crash the caller"
     branch_count = lower.count("elif") + lower.count("else if") + lower.count("case ")
     if branch_count >= 2:
-        return f"branches across {branch_count + 1} cases based on the condition"
-    return "selects the execution path based on the condition"
+        return f"handle {branch_count + 1} distinct scenarios that each require different treatment"
+    return "choose the correct path because the outcome differs by condition"
 
 
 def _detect_variable_intent(var_name: str, rhs: str, surrounding: str) -> str:
-    """Infer why a variable assignment is critical."""
+    """Infer why a variable assignment matters — what depends on it."""
     lower_rhs = rhs.lower()
     lower_ctx = surrounding.lower()
     if any(k in lower_rhs for k in ["config", "setting", "option", "param", "env"]):
-        return f"configuration value that controls downstream behavior"
+        return f"captures the configuration that governs how the rest of the pipeline behaves"
     if any(k in lower_rhs for k in ["connect", "client", "session", "pool", "socket"]):
-        return f"connection handle used for subsequent operations"
+        return f"establishes the connection that all subsequent calls depend on"
     if any(k in lower_rhs for k in ["query", "sql", "select", "cursor"]):
-        return f"query result that drives the processing logic"
+        return f"fetches the data that the remaining logic transforms and returns"
     if any(k in lower_rhs for k in ["request", "response", "fetch", "api", "http"]):
-        return f"API response data used in further processing"
+        return f"retrieves the external data needed before processing can continue"
     if any(k in lower_rhs for k in ["path", "file", "dir", "url", "uri"]):
-        return f"resource path resolved for file or network access"
+        return f"resolves the target location so readers and writers operate on the correct resource"
     if any(k in lower_rhs for k in ["re.compile", "regex", "pattern"]):
-        return f"compiled pattern used for text matching"
+        return f"pre-compiles the pattern so repeated matching is efficient"
     if f"return {var_name}" in lower_ctx or f"return({var_name}" in lower_ctx:
-        return f"computed result that is returned to the caller"
+        return f"holds the final result that the caller depends on"
     if var_name in lower_ctx.split("if ")[-1] if "if " in lower_ctx else "":
-        return f"flag or state that controls the branching logic"
-    return f"intermediate value used in the subsequent computation"
+        return f"determines which branch executes, affecting the outcome"
+    return f"stores an intermediate value that later steps depend on"
 
 
 def _extract_fragments_from_code(
@@ -779,18 +818,17 @@ def _extract_fragments_from_code(
             header = m.group(2).strip()
             intent = _detect_loop_intent(block_text)
 
-            # Build comment
+            # Build purpose-driven comment explaining why the loop exists
             if header.startswith("for "):
-                # Try to extract iteration target
                 iter_match = re.search(r"for\s+\w+\s+in\s+(.+?)\s*[:{]", header)
                 collection = iter_match.group(1).strip().rstrip(":") if iter_match else "the collection"
-                comment = f"Iterates over {collection} and {intent}."
+                comment = f"Walks {collection} to {intent}."
             elif header.startswith("while "):
                 cond_match = re.search(r"while\s+(.+?)\s*[:{]", header)
                 condition = cond_match.group(1).strip().rstrip(":") if cond_match else "the condition holds"
-                comment = f"Continues while {condition} and {intent}."
+                comment = f"Keeps running while {condition} to {intent}."
             else:
-                comment = f"Loops and {intent}."
+                comment = f"Repeats to {intent}."
 
             fragments.append(SampleRecord(
                 code=block_text,

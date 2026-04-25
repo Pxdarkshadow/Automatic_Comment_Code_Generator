@@ -676,6 +676,7 @@ def run_pipeline():
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
+            tmp_ckpt = CKPT_PATH + ".tmp"
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -684,8 +685,9 @@ def run_pipeline():
                     "epoch": global_epoch,
                     "val_loss": avg_val_loss,
                 },
-                CKPT_PATH,
+                tmp_ckpt,
             )
+            os.replace(tmp_ckpt, CKPT_PATH)
             print(f"         [*] Saved best checkpoint (val_loss={avg_val_loss:.4f})")
         else:
             patience_counter += 1
