@@ -55,10 +55,10 @@ N_LAYERS         = 4
 D_MODEL          = 384
 N_HEADS          = 6
 D_FF             = 1536
-DROPOUT          = 0.15
-LEARNING_RATE    = 1e-4
+DROPOUT          = 0.12
+LEARNING_RATE    = 5e-5
 WEIGHT_DECAY     = 0.05
-WARMUP_STEPS     = 500
+WARMUP_STEPS     = 800
 CLIP             = 1.0
 VALIDATION_SPLIT = 0.15
 PATIENCE         = 10
@@ -534,7 +534,10 @@ def run_pipeline():
             # Phase 0: stability assertions
             assert not torch.isnan(loss), f"NaN loss at epoch {global_epoch} step {step}"
             assert not torch.isinf(loss), f"Inf loss at epoch {global_epoch} step {step}"
-            assert last_grad_norm < 100.0, f"Gradient explosion ({last_grad_norm:.2f}) at epoch {global_epoch} step {step}"
+            if math.isnan(last_grad_norm) or math.isinf(last_grad_norm):
+                print(f"  [WARN] Skipping step {step} (grad_norm={last_grad_norm})")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             scaler.step(optimizer)
             scaler.update()

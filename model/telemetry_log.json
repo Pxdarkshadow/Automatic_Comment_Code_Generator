@@ -1,5 +1,5 @@
 {
-  "experiment_id": "exp_20260423_213544",
+  "experiment_id": "exp_20260425_120744",
   "model_name": "TransformerDecoder-CodeComment",
   "mixed_precision": true,
   "architecture": {
@@ -24,7 +24,7 @@
     "clip_grad_norm": 1.0,
     "comment_loss_weight": 2.2,
     "epochs_total": 50,
-    "resumed_from_epoch": 50,
+    "resumed_from_epoch": 0,
     "validation_split": 0.15,
     "early_stopping_patience": 10,
     "seed": 42
@@ -32,7 +32,8 @@
   "dataset": {
     "sources": [
       "codesearchnet",
-      "codexglue"
+      "codexglue",
+      "synthetic_fragment"
     ],
     "languages": [
       "python",
@@ -43,10 +44,10 @@
       "ruby"
     ],
     "raw_samples": 96000,
-    "duplicates_removed": 1938,
-    "deduplicated_samples": 94062,
-    "train_samples": 79945,
-    "val_samples": 14117,
+    "duplicates_removed": 1793,
+    "deduplicated_samples": 122469,
+    "train_samples": 108338,
+    "val_samples": 14131,
     "vocab_size": 8192,
     "max_seq_len": 512,
     "source_breakdown": {
@@ -62,50 +63,62 @@
       "ruby": 16000
     },
     "code_leakage_count": 0,
+    "code_type_breakdown": {
+      "function": 94207,
+      "complex_logic": 15394,
+      "variable": 6795,
+      "loop": 6073
+    },
     "tokenizer": "BPE",
-    "validation_strategy": "repo_aware_group_split"
+    "validation_strategy": "repo_aware_group_split",
+    "code_types": {
+      "function": 94207,
+      "complex_logic": 15394,
+      "variable": 6795,
+      "loop": 6073
+    }
   },
   "device": "cuda",
-  "started_at": "2026-04-23T21:35:44.470048",
+  "started_at": "2026-04-25T12:07:44.141733",
   "epochs": [
     {
-      "epoch": 51,
+      "epoch": 1,
       "local_epoch": 1,
-      "train_loss": 2.12752,
-      "val_loss": 2.040484,
-      "train_perplexity": 8.394,
-      "val_perplexity": 7.6943,
-      "train_precision": 0.904594,
-      "train_recall": 0.904594,
-      "train_f1": 0.904594,
-      "val_precision": 0.92225,
-      "val_recall": 0.92225,
-      "val_f1": 0.92225,
-      "bleu_4": 0.03357,
-      "learning_rate": 9.995107787121058e-05,
-      "grad_norm": 1.3046,
-      "epoch_time_sec": 500.39
+      "train_loss": 6.930736,
+      "val_loss": 5.962034,
+      "train_perplexity": 1023.2466,
+      "val_perplexity": 388.3994,
+      "train_precision": 0.105749,
+      "train_recall": 0.105749,
+      "train_f1": 0.105749,
+      "val_precision": 0.136536,
+      "val_recall": 0.136536,
+      "val_f1": 0.136536,
+      "bleu_4": 0.00561,
+      "learning_rate": 9.993965274890505e-05,
+      "grad_norm": 1.0,
+      "epoch_time_sec": 663.66
     },
     {
-      "epoch": 52,
+      "epoch": 2,
       "local_epoch": 2,
-      "train_loss": 2.114775,
-      "val_loss": 2.021371,
-      "train_perplexity": 8.2877,
-      "val_perplexity": 7.5487,
-      "train_precision": 0.90586,
-      "train_recall": 0.90586,
-      "train_f1": 0.90586,
-      "val_precision": 0.924153,
-      "val_recall": 0.924153,
-      "val_f1": 0.924153,
-      "bleu_4": 0.056911,
-      "learning_rate": 9.971163159161947e-05,
-      "grad_norm": 1.6406,
-      "epoch_time_sec": 504.06
+      "train_loss": 5.546281,
+      "val_loss": 5.441474,
+      "train_perplexity": 256.2828,
+      "val_perplexity": 230.7822,
+      "train_precision": 0.201782,
+      "train_recall": 0.201782,
+      "train_f1": 0.201782,
+      "val_precision": 0.226832,
+      "val_recall": 0.226832,
+      "val_f1": 0.226832,
+      "bleu_4": 0.0,
+      "learning_rate": 9.968534220165291e-05,
+      "grad_norm": 1.0,
+      "epoch_time_sec": 638.13
     }
   ],
-  "completed_at": "2026-04-23T21:52:29.029127",
-  "best_val_loss": 2.021371,
+  "completed_at": "2026-04-25T12:29:26.074351",
+  "best_val_loss": 5.441474,
   "total_epochs_run": 2
 }
