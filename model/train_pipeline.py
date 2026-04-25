@@ -534,9 +534,14 @@ def run_pipeline():
             # Phase 0: stability assertions
             assert not torch.isnan(loss), f"NaN loss at epoch {global_epoch} step {step}"
             assert not torch.isinf(loss), f"Inf loss at epoch {global_epoch} step {step}"
+
             if math.isnan(last_grad_norm) or math.isinf(last_grad_norm):
                 print(f"  [WARN] Skipping step {step} (grad_norm={last_grad_norm})")
+                # Must still step scaler (it will skip internally due to inf grads)
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
                 continue
 
             scaler.step(optimizer)
