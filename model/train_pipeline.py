@@ -526,6 +526,8 @@ def run_pipeline():
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
             last_grad_norm = compute_grad_norm(model)
 
             # Phase 0: stability assertions
@@ -533,7 +535,6 @@ def run_pipeline():
             assert not torch.isinf(loss), f"Inf loss at epoch {global_epoch} step {step}"
             assert last_grad_norm < 100.0, f"Gradient explosion ({last_grad_norm:.2f}) at epoch {global_epoch} step {step}"
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
