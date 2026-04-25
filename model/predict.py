@@ -61,12 +61,16 @@ SYSTEM_INSTRUCTION = (
     "Generate one concise code comment sentence.\n"
     "Write like a strong small code assistant, not a consultant.\n"
     "Describe the primary purpose of the code and the most important behavior or outcome.\n"
+    "The code element may be a function, loop, logic block, or variable assignment.\n"
+    "For loops: describe what is iterated and what the loop accumulates, filters, or produces.\n"
+    "For logic blocks: describe the branching condition and the cases handled.\n"
+    "For variable assignments: describe what the variable holds and why it matters.\n"
     "Prefer concrete actions such as sorting, validating, formatting, loading, filtering, merging, or rendering.\n"
     "Be specific to the snippet and mention inputs, outputs, ordering, or side effects when they are obvious.\n"
     "Avoid filler and avoid vague architectural jargon.\n"
     "Output requirements:\n"
     "1. Produce exactly one sentence.\n"
-    "2. Start directly with the action, such as 'Sorts', 'Validates', 'Loads', 'Formats', or 'Renders'.\n"
+    "2. Start directly with the action, such as 'Sorts', 'Validates', 'Loads', 'Iterates', 'Stores', or 'Guards'.\n"
     "3. Do not use filler phrases such as 'this code', 'here is', or 'the function'.\n"
     "4. Do not repeat the function name unless it adds useful meaning.\n"
     "5. Avoid phrases such as orchestration boundary, subsystem transition, encapsulation boundary, or domain orchestration.\n"
@@ -489,11 +493,74 @@ def _extract_intents(code: str) -> list[str]:
     return intents
 
 
-def _build_descriptive_fallback(code: str) -> tuple[str, str]:
+def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple[str, str]:
     """Generate a deterministic code-relevant comment when the model is unavailable or low-quality."""
+    code_lower = code.lower()
+
+    # ── Loop fallback ────────────────────────────────────────────────────
+    if code_type == "loop":
+        if any(k in code_lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
+            return ("Iterates to accumulate a running total.", "intent:loop_accumulate")
+        if any(k in code_lower for k in ["filter", "append", "push", "add("]):
+            return ("Iterates to collect elements matching the criteria.", "intent:loop_filter")
+        if any(k in code_lower for k in ["max(", "min(", "largest", "smallest"]):
+            return ("Iterates to find the extreme value.", "intent:loop_extreme")
+        if any(k in code_lower for k in ["sort", "swap", "compare"]):
+            return ("Iterates to reorder elements.", "intent:loop_sort")
+        if any(k in code_lower for k in ["print(", "log(", "write("]):
+            return ("Iterates to output each element.", "intent:loop_output")
+        # Extract iterable
+        for_match = re.search(r"for\s+\w+\s+in\s+(.+?)\s*[:{]", code)
+        if for_match:
+            collection = for_match.group(1).strip().rstrip(":")
+            return (f"Iterates over {collection} and processes each element.", "intent:loop_iterate")
+        while_match = re.search(r"while\s+(.+?)\s*[:{]", code)
+        if while_match:
+            condition = while_match.group(1).strip().rstrip(":")
+            return (f"Continues processing while {condition}.", "intent:loop_while")
+        return ("Iterates through the collection and processes each element.", "intent:loop_generic")
+
+    # ── Complex logic fallback ───────────────────────────────────────────
+    if code_type == "complex_logic":
+        if any(k in code_lower for k in ["valid", "check", "assert", "schema", "required"]):
+            return ("Validates the input and rejects invalid cases.", "intent:logic_validate")
+        if any(k in code_lower for k in ["error", "except", "catch", "raise", "throw"]):
+            return ("Handles error conditions with recovery logic.", "intent:logic_error")
+        if any(k in code_lower for k in ["permission", "auth", "role", "access"]):
+            return ("Enforces access control based on permissions.", "intent:logic_auth")
+        if any(k in code_lower for k in ["type(", "isinstance", "typeof", "switch", "match"]):
+            return ("Dispatches to the handler based on type.", "intent:logic_dispatch")
+        if any(k in code_lower for k in ["retry", "attempt", "fallback", "timeout"]):
+            return ("Implements retry logic with fallback.", "intent:logic_retry")
+        if any(k in code_lower for k in ["null", "none", "undefined", "empty"]):
+            return ("Guards against null or missing values.", "intent:logic_guard")
+        branch_count = code_lower.count("elif") + code_lower.count("else if") + code_lower.count("case ")
+        if branch_count >= 2:
+            return (f"Branches across {branch_count + 1} cases based on the condition.", "intent:logic_branch")
+        return ("Selects the execution path based on the condition.", "intent:logic_generic")
+
+    # ── Variable fallback ────────────────────────────────────────────────
+    if code_type == "variable":
+        var_match = re.search(r"(?:const|let|var|)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", code)
+        if var_match:
+            var_name = var_match.group(1)
+            rhs = var_match.group(2).lower()
+            if any(k in rhs for k in ["config", "setting", "option", "param", "env"]):
+                return (f"{var_name}: configuration value controlling downstream behavior.", "intent:var_config")
+            if any(k in rhs for k in ["connect", "client", "session", "pool", "socket"]):
+                return (f"{var_name}: connection handle for subsequent operations.", "intent:var_connection")
+            if any(k in rhs for k in ["query", "sql", "select", "cursor"]):
+                return (f"{var_name}: query result driving the processing logic.", "intent:var_query")
+            if any(k in rhs for k in ["request", "response", "fetch", "api", "http"]):
+                return (f"{var_name}: API response data for further processing.", "intent:var_api")
+            if any(k in rhs for k in ["path", "file", "dir", "url", "uri"]):
+                return (f"{var_name}: resource path for file or network access.", "intent:var_path")
+            return (f"{var_name}: computed value used in the subsequent logic.", "intent:var_computed")
+        return ("Stores a critical intermediate value.", "intent:var_generic")
+
+    # ── Function/class fallback (original logic) ─────────────────────────
     function_name = _extract_function_name(code) or "System"
     lower_name = function_name.lower()
-    code_lower = code.lower()
 
     if "merge_sort" in lower_name or ("sort" in lower_name and "mid" in code_lower and "len(" in code_lower):
         return (
@@ -562,7 +629,7 @@ def _build_descriptive_fallback(code: str) -> tuple[str, str]:
     return (f"Processes{param_phrase}.", "intent:concise_summary")
 
 
-def _is_low_quality_comment(comment: str, code: str = "") -> tuple[bool, str | None]:
+def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "function") -> tuple[bool, str | None]:
     """Check if the generated comment is too noisy to ship."""
     text = _normalize_spaces(comment)
     if not text:
@@ -594,7 +661,11 @@ def _is_low_quality_comment(comment: str, code: str = "") -> tuple[bool, str | N
         return True, "tautology"
 
     if len(words) < 3:
-        return True, "too_short"
+        # Allow shorter comments for variable annotations (e.g. "varName: computed result.")
+        if code_type == "variable" and len(words) >= 2:
+            pass  # variable annotations can be 2+ words
+        else:
+            return True, "too_short"
 
     unique_ratio = len(set(words)) / max(len(words), 1)
     if unique_ratio < 0.3:
@@ -669,6 +740,7 @@ def _score_comment_text(comment: str, code: str) -> float:
 def predict_with_meta(
     code_snippet: str,
     config: DecodeConfig | None = None,
+    code_type: str = "function",
 ) -> dict:
     """
     Run a full inference pass.  Returns a JSON-serializable dict
@@ -682,7 +754,7 @@ def predict_with_meta(
 
     # Build prompt — DO NOT prepend system instruction since model wasn't trained on it
     # We still keep SYSTEM_INSTRUCTION definition for API compatibility if tests check it
-    prompt_text = FormattingPipe.format_inference(code_snippet)
+    prompt_text = FormattingPipe.format_inference(code_snippet, code_type=code_type)
     prompt_ids = tokenizer.encode(prompt_text)
     prefix_len = len(prompt_ids)
 
@@ -734,7 +806,7 @@ def predict_with_meta(
         best_text = apply_text_normalization(code_snippet, best_text)
 
     # ── Quality gate & fallback ──────────────────────────────────────────
-    low_quality, reason = _is_low_quality_comment(best_text, code_snippet)
+    low_quality, reason = _is_low_quality_comment(best_text, code_snippet, code_type)
     if not model_ready:
         reason = "model_load_failed"
     elif decode_error is not None:
@@ -743,7 +815,7 @@ def predict_with_meta(
     used_fallback = False
 
     if low_quality or not model_ready or decode_error is not None:
-        best_text, fallback_rule = _build_descriptive_fallback(code_snippet)
+        best_text, fallback_rule = _build_descriptive_fallback(code_snippet, code_type)
         used_fallback = True
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -765,9 +837,9 @@ def predict_with_meta(
     return telemetry
 
 
-def predict(code_snippet: str, config: DecodeConfig | None = None) -> str:
+def predict(code_snippet: str, config: DecodeConfig | None = None, code_type: str = "function") -> str:
     """Convenience wrapper that returns just the comment string."""
-    return predict_with_meta(code_snippet, config=config)["comment"]
+    return predict_with_meta(code_snippet, config=config, code_type=code_type)["comment"]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -787,6 +859,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--length-alpha", type=float, default=0.0)
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
     parser.add_argument("--no-cache", dest="use_cache", action="store_false", default=True)
+    parser.add_argument("--code-type", dest="code_type", default="function",
+                        choices=["function", "loop", "complex_logic", "variable"],
+                        help="Type of code element being commented")
 
     return parser.parse_args()
 
@@ -820,7 +895,7 @@ if __name__ == "__main__":
 
     )
 
-    output = predict_with_meta(code_input, config=config)
+    output = predict_with_meta(code_input, config=config, code_type=args.code_type)
     if args.as_json:
         print(json.dumps(output, ensure_ascii=True))
     else:

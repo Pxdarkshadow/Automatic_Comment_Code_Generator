@@ -476,6 +476,7 @@ def run_pipeline():
             **dataset_stats,
             "tokenizer": "BPE",
             "validation_strategy": "repo_aware_group_split",
+            "code_types": dataset_stats.get("code_type_breakdown", {}),
         },
         "device": str(device),
         "started_at": datetime.datetime.now().isoformat(),

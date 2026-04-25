@@ -25,13 +25,13 @@ export interface GenerationResult {
  * Encodes the payload to bypass command-line termination issues, invokes the parallel analysis process,
  * and surfaces the computed textual result while reporting status milestones back to the invocation source.
  */
-export async function generateComment(code: string, progressCallback: (msg: string) => void): Promise<GenerationResult> {
+export async function generateComment(code: string, progressCallback: (msg: string) => void, codeType: string = 'function'): Promise<GenerationResult> {
     progressCallback("Starting local PyTorch model inference...");
     
     return new Promise((resolve, reject) => {
         const scriptPath = path.join(__dirname, '..', 'model', 'predict.py');
         const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
-        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len 8 --max-len 48 --length-alpha 0.7 --repetition-penalty 1.3`;
+        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len 8 --max-len 48 --length-alpha 0.7 --repetition-penalty 1.3 --code-type ${codeType}`;
         
         exec(command, { cwd: path.join(__dirname, '..', 'model') }, (error, stdout, stderr) => {
             if (error) {

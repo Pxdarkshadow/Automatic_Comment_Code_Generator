@@ -92,6 +92,7 @@ class SampleRecord:
     repo: str
     path: str
     source: str
+    code_type: str = "function"  # function | loop | complex_logic | variable
 
 
 # ── Pre-tokenization ────────────────────────────────────────────────────────
@@ -320,20 +321,23 @@ class BPETokenizer:
 class FormattingPipe:
     """
     Wraps (code, comment) pairs into the GPT prompt template.
-    Training:   "Code:\n{code}\n\nComment: {comment}<eos>"
-    Inference:  "Code:\n{code}\n\nComment:"  (model generates from here)
+    Training:   "Code:\n[TYPE:xxx]\n{code}\n\nComment: {comment}<eos>"
+    Inference:  "Code:\n[TYPE:xxx]\n{code}\n\nComment:"  (model generates from here)
+
+    The [TYPE:xxx] tag tells the model what kind of code element it is
+    commenting on: function, loop, complex_logic, or variable.
     """
 
-    PROMPT_TEMPLATE = "Code:\n{code}\n\nComment:"
-    FULL_TEMPLATE = "Code:\n{code}\n\nComment: {comment}"
+    PROMPT_TEMPLATE = "Code:\n[TYPE:{code_type}]\n{code}\n\nComment:"
+    FULL_TEMPLATE = "Code:\n[TYPE:{code_type}]\n{code}\n\nComment: {comment}"
 
     @staticmethod
-    def format_train(code: str, comment: str) -> str:
-        return FormattingPipe.FULL_TEMPLATE.format(code=code, comment=comment)
+    def format_train(code: str, comment: str, code_type: str = "function") -> str:
+        return FormattingPipe.FULL_TEMPLATE.format(code=code, comment=comment, code_type=code_type)
 
     @staticmethod
-    def format_inference(code: str) -> str:
-        return FormattingPipe.PROMPT_TEMPLATE.format(code=code)
+    def format_inference(code: str, code_type: str = "function") -> str:
+        return FormattingPipe.PROMPT_TEMPLATE.format(code=code, code_type=code_type)
 
 
 # ── Data Collection (from CodeSearchNet) ─────────────────────────────────────
@@ -471,6 +475,7 @@ def _curate_record(
     repo: str,
     path: str,
     source: str,
+    code_type: str = "function",
 ) -> SampleRecord | None:
     code = (code or "").strip()
     raw_doc = (raw_doc or "").strip()
@@ -486,6 +491,7 @@ def _curate_record(
         repo=(repo or "").strip(),
         path=(path or "").strip(),
         source=source,
+        code_type=code_type,
     )
 
 
@@ -618,6 +624,318 @@ def _repo_aware_split(samples: list[SampleRecord], val_split: float) -> tuple[li
         val_records = val_records[:target_val]
 
     return train_records, val_records
+
+
+# ── Fragment Extraction & Synthetic Pair Generation ──────────────────────────
+#
+# Extracts loops, complex logic blocks, and critical variables from existing
+# function-level code samples to generate additional training pairs. This
+# teaches the model to comment on sub-function granularity.
+
+_LOOP_PATTERNS = [
+    re.compile(r"^(\s*)(for\s+.+)$", re.MULTILINE),
+    re.compile(r"^(\s*)(while\s+.+)$", re.MULTILINE),
+    re.compile(r"^(\s*)(do\s*\{?)$", re.MULTILINE),
+]
+
+_COMPLEX_LOGIC_PATTERNS = [
+    re.compile(r"^(\s*)(if\s+.+)$", re.MULTILINE),
+    re.compile(r"^(\s*)(try\s*[:{]?)$", re.MULTILINE),
+    re.compile(r"^(\s*)(switch\s*\(.+\)\s*\{?)$", re.MULTILINE),
+    re.compile(r"^(\s*)(match\s+.+:)$", re.MULTILINE),
+]
+
+_CRITICAL_VAR_PATTERNS = [
+    # Assignments that feed into returns, conditions, or API calls
+    re.compile(
+        r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$",
+        re.MULTILINE,
+    ),
+]
+
+
+def _extract_block(lines: list[str], start_idx: int, base_indent: int, is_brace_lang: bool) -> list[str]:
+    """Extract a complete block starting at start_idx based on indentation or braces."""
+    block = [lines[start_idx]]
+    if is_brace_lang:
+        depth = lines[start_idx].count("{") - lines[start_idx].count("}")
+        if depth <= 0 and "{" in lines[start_idx]:
+            return block
+        for i in range(start_idx + 1, min(start_idx + 40, len(lines))):
+            line = lines[i]
+            block.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                break
+    else:
+        for i in range(start_idx + 1, min(start_idx + 40, len(lines))):
+            line = lines[i]
+            stripped = line.lstrip()
+            if not stripped:
+                block.append(line)
+                continue
+            indent = len(line) - len(stripped)
+            if indent <= base_indent:
+                break
+            block.append(line)
+    return block
+
+
+def _detect_loop_intent(block_text: str) -> str:
+    """Infer the purpose of a loop from its body."""
+    lower = block_text.lower()
+    if any(k in lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
+        return "accumulates a running total"
+    if any(k in lower for k in ["filter", "if ", "append", "push", "add("]):
+        return "collects items that match the selection criteria"
+    if any(k in lower for k in ["max(", "min(", "largest", "smallest", "best"]):
+        return "finds the extreme value across the collection"
+    if any(k in lower for k in ["transform", "map(", "convert", "format"]):
+        return "transforms each element into the required format"
+    if any(k in lower for k in ["print(", "log(", "write(", "output"]):
+        return "processes and outputs each element"
+    if any(k in lower for k in ["index", "search", "find", "locate"]):
+        return "searches for a target element in the collection"
+    if any(k in lower for k in ["sort", "swap", "compare"]):
+        return "reorders elements according to the comparison logic"
+    if any(k in lower for k in ["yield", "next(", "iter"]):
+        return "generates values lazily from the source"
+    return "processes each element in the collection"
+
+
+def _detect_logic_intent(block_text: str) -> str:
+    """Infer the purpose of a complex logic block."""
+    lower = block_text.lower()
+    if any(k in lower for k in ["valid", "check", "assert", "schema", "required"]):
+        return "validates the input and rejects invalid cases"
+    if any(k in lower for k in ["error", "except", "catch", "raise", "throw"]):
+        return "handles error conditions and recovery"
+    if any(k in lower for k in ["permission", "auth", "role", "access"]):
+        return "enforces access control based on permissions"
+    if any(k in lower for k in ["type(", "isinstance", "typeof", "switch", "match"]):
+        return "dispatches to the correct handler based on type"
+    if any(k in lower for k in ["retry", "attempt", "fallback", "timeout"]):
+        return "implements retry logic with fallback handling"
+    if any(k in lower for k in ["null", "none", "undefined", "empty"]):
+        return "guards against null or missing values"
+    branch_count = lower.count("elif") + lower.count("else if") + lower.count("case ")
+    if branch_count >= 2:
+        return f"branches across {branch_count + 1} cases based on the condition"
+    return "selects the execution path based on the condition"
+
+
+def _detect_variable_intent(var_name: str, rhs: str, surrounding: str) -> str:
+    """Infer why a variable assignment is critical."""
+    lower_rhs = rhs.lower()
+    lower_ctx = surrounding.lower()
+    if any(k in lower_rhs for k in ["config", "setting", "option", "param", "env"]):
+        return f"configuration value that controls downstream behavior"
+    if any(k in lower_rhs for k in ["connect", "client", "session", "pool", "socket"]):
+        return f"connection handle used for subsequent operations"
+    if any(k in lower_rhs for k in ["query", "sql", "select", "cursor"]):
+        return f"query result that drives the processing logic"
+    if any(k in lower_rhs for k in ["request", "response", "fetch", "api", "http"]):
+        return f"API response data used in further processing"
+    if any(k in lower_rhs for k in ["path", "file", "dir", "url", "uri"]):
+        return f"resource path resolved for file or network access"
+    if any(k in lower_rhs for k in ["re.compile", "regex", "pattern"]):
+        return f"compiled pattern used for text matching"
+    if f"return {var_name}" in lower_ctx or f"return({var_name}" in lower_ctx:
+        return f"computed result that is returned to the caller"
+    if var_name in lower_ctx.split("if ")[-1] if "if " in lower_ctx else "":
+        return f"flag or state that controls the branching logic"
+    return f"intermediate value used in the subsequent computation"
+
+
+def _extract_fragments_from_code(
+    code: str,
+    language: str,
+    max_loops: int = 3,
+    max_logic: int = 2,
+    max_vars: int = 2,
+) -> list[SampleRecord]:
+    """
+    Extract sub-function fragments (loops, logic blocks, variables) from a
+    function body and generate synthetic (code, comment) training pairs.
+    """
+    lines = code.split("\n")
+    is_brace = language not in ("python", "ruby")
+    fragments: list[SampleRecord] = []
+
+    # ── Loop extraction ──────────────────────────────────────────────────
+    loop_count = 0
+    for pat in _LOOP_PATTERNS:
+        for m in pat.finditer(code):
+            if loop_count >= max_loops:
+                break
+            line_idx = code[:m.start()].count("\n")
+            indent_len = len(m.group(1))
+            block_lines = _extract_block(lines, line_idx, indent_len, is_brace)
+            block_text = "\n".join(block_lines)
+            if len(block_lines) < 2:
+                continue
+
+            # Extract the iterable/condition for a more specific comment
+            header = m.group(2).strip()
+            intent = _detect_loop_intent(block_text)
+
+            # Build comment
+            if header.startswith("for "):
+                # Try to extract iteration target
+                iter_match = re.search(r"for\s+\w+\s+in\s+(.+?)\s*[:{]", header)
+                collection = iter_match.group(1).strip().rstrip(":") if iter_match else "the collection"
+                comment = f"Iterates over {collection} and {intent}."
+            elif header.startswith("while "):
+                cond_match = re.search(r"while\s+(.+?)\s*[:{]", header)
+                condition = cond_match.group(1).strip().rstrip(":") if cond_match else "the condition holds"
+                comment = f"Continues while {condition} and {intent}."
+            else:
+                comment = f"Loops and {intent}."
+
+            fragments.append(SampleRecord(
+                code=block_text,
+                comment=comment,
+                language=language,
+                repo="",
+                path="",
+                source="synthetic_fragment",
+                code_type="loop",
+            ))
+            loop_count += 1
+
+    # ── Complex logic extraction ─────────────────────────────────────────
+    logic_count = 0
+    for pat in _COMPLEX_LOGIC_PATTERNS:
+        for m in pat.finditer(code):
+            if logic_count >= max_logic:
+                break
+            line_idx = code[:m.start()].count("\n")
+            indent_len = len(m.group(1))
+            block_lines = _extract_block(lines, line_idx, indent_len, is_brace)
+
+            # For if-blocks, also capture elif/else siblings at the same indent
+            header = m.group(2).strip()
+            if header.startswith(("if ", "try")):
+                next_idx = line_idx + len(block_lines)
+                while next_idx < len(lines):
+                    next_line = lines[next_idx].lstrip()
+                    next_indent = len(lines[next_idx]) - len(next_line) if next_line else 999
+                    if next_indent == indent_len and next_line.startswith(("elif ", "else", "except", "catch", "finally")):
+                        sibling = _extract_block(lines, next_idx, indent_len, is_brace)
+                        block_lines.extend(sibling)
+                        next_idx += len(sibling)
+                    elif not next_line:
+                        next_idx += 1
+                    else:
+                        break
+
+            block_text = "\n".join(block_lines)
+            if len(block_lines) < 3:
+                continue
+
+            intent = _detect_logic_intent(block_text)
+            comment = intent[0].upper() + intent[1:]
+            if not comment.endswith("."):
+                comment += "."
+
+            fragments.append(SampleRecord(
+                code=block_text,
+                comment=comment,
+                language=language,
+                repo="",
+                path="",
+                source="synthetic_fragment",
+                code_type="complex_logic",
+            ))
+            logic_count += 1
+
+    # ── Critical variable extraction ─────────────────────────────────────
+    var_count = 0
+    for pat in _CRITICAL_VAR_PATTERNS:
+        for m in pat.finditer(code):
+            if var_count >= max_vars:
+                break
+            var_name = m.group(2)
+            rhs = m.group(3).strip()
+
+            # Skip trivial assignments (simple literals, self.x = x, etc.)
+            if re.match(r"^(None|True|False|\d+|['\"].{0,20}['\"]|self\.\w+|\[\]|\{\}|0|0\.0)$", rhs):
+                continue
+            # Skip loop variables and very short names
+            if len(var_name) < 3:
+                continue
+
+            # Check if variable is used in return, condition, or API call
+            after_assignment = code[m.end():]
+            is_critical = any(
+                var_name in segment
+                for segment in [
+                    *re.findall(r"return\s+.+", after_assignment),
+                    *re.findall(r"if\s+.+", after_assignment),
+                    *re.findall(r"\w+\.(\w+)\(", after_assignment),
+                ]
+            )
+            if not is_critical:
+                continue
+
+            assignment_line = m.group(0).strip()
+            intent = _detect_variable_intent(var_name, rhs, code)
+            comment = f"{var_name}: {intent}."
+            comment = comment[0].upper() + comment[1:]
+
+            fragments.append(SampleRecord(
+                code=assignment_line,
+                comment=comment,
+                language=language,
+                repo="",
+                path="",
+                source="synthetic_fragment",
+                code_type="variable",
+            ))
+            var_count += 1
+
+    return fragments
+
+
+def _generate_synthetic_fragments(
+    samples: list[SampleRecord],
+    max_synthetic_per_sample: int = 5,
+    target_count: int | None = None,
+) -> list[SampleRecord]:
+    """
+    Generate synthetic training pairs by extracting sub-function fragments
+    (loops, complex logic, critical variables) from existing function samples.
+    """
+    synthetic: list[SampleRecord] = []
+    rng = random.Random(RANDOM_SEED + 97)
+    shuffled = list(samples)
+    rng.shuffle(shuffled)
+
+    effective_target = target_count or int(len(samples) * 0.3)
+
+    for sample in shuffled:
+        if len(synthetic) >= effective_target:
+            break
+        try:
+            frags = _extract_fragments_from_code(
+                sample.code,
+                sample.language,
+                max_loops=2,
+                max_logic=1,
+                max_vars=1,
+            )
+            synthetic.extend(frags[:max_synthetic_per_sample])
+        except Exception:
+            continue
+
+    print(f"  Generated {len(synthetic)} synthetic fragment pairs")
+    type_counts = {}
+    for s in synthetic:
+        type_counts[s.code_type] = type_counts.get(s.code_type, 0) + 1
+    for ct, cnt in sorted(type_counts.items()):
+        print(f"    {ct}: {cnt}")
+
+    return synthetic[:effective_target]
 
 
 # ── Main Build Pipeline ──────────────────────────────────────────────────────
@@ -773,7 +1091,22 @@ def build_dataset(
     else:
         print(f"  [OK] Zero code-level leakage between train and val")
 
-    corpus = [FormattingPipe.format_train(sample.code, sample.comment) for sample in deduped_samples]
+    # ── Synthetic fragment generation ─────────────────────────────────────
+    print("\n  Generating synthetic fragments (loops, logic, variables)...")
+    synthetic_fragments = _generate_synthetic_fragments(deduped_samples)
+    if synthetic_fragments:
+        # Deduplicate synthetic fragments against existing samples
+        existing_hashes = {_normalize_code_key(s.code) for s in deduped_samples}
+        novel = [f for f in synthetic_fragments if _normalize_code_key(f.code) not in existing_hashes]
+        print(f"  Novel synthetic fragments: {len(novel)} (filtered {len(synthetic_fragments) - len(novel)} dupes)")
+
+        # Add to both train and deduped for tokenizer training
+        deduped_samples.extend(novel)
+        train_records.extend(novel)
+        dataset_stats = {**({} if 'dataset_stats' not in dir() else {}),
+                         "synthetic_fragments": len(novel)}
+
+    corpus = [FormattingPipe.format_train(sample.code, sample.comment, sample.code_type) for sample in deduped_samples]
     tokenizer = BPETokenizer()
     tokenizer.train(corpus, target_vocab_size=bpe_vocab_size)
 
@@ -790,7 +1123,7 @@ def build_dataset(
         skipped_local = 0
         total_records = len(records)
         for i, sample in enumerate(records, 1):
-            full_text = FormattingPipe.format_train(sample.code, sample.comment)
+            full_text = FormattingPipe.format_train(sample.code, sample.comment, sample.code_type)
             ids = tokenizer.encode(full_text, add_eos=True)
             if len(ids) < 10:
                 skipped_local += 1
@@ -811,8 +1144,13 @@ def build_dataset(
     if train_skipped or val_skipped:
         print(f"  Skipped {train_skipped} train and {val_skipped} val sequences (too short)")
 
+    # Count code types in the final dataset
+    code_type_breakdown = {}
+    for sample in deduped_samples:
+        code_type_breakdown[sample.code_type] = code_type_breakdown.get(sample.code_type, 0) + 1
+
     dataset_stats = {
-        "sources": list(DEFAULT_SOURCES) + (["local_jsonl"] if LOCAL_JSONL_GLOB else []),
+        "sources": list(DEFAULT_SOURCES) + (["local_jsonl"] if LOCAL_JSONL_GLOB else []) + ["synthetic_fragment"],
         "languages": list(DEFAULT_LANGUAGES),
         "raw_samples": len(collected_samples),
         "duplicates_removed": duplicates_removed,
@@ -824,6 +1162,7 @@ def build_dataset(
         "source_breakdown": source_breakdown,
         "language_breakdown": language_breakdown,
         "code_leakage_count": len(code_leakage),
+        "code_type_breakdown": code_type_breakdown,
     }
 
     print("\n=== Dataset ready ===")

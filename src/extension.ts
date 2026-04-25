@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
 import { generateComment } from './aiProvider';
 
-type TargetKind = 'class' | 'function';
+type TargetKind = 'class' | 'function' | 'loop' | 'complex_logic' | 'variable';
 
 interface CommentTarget {
     line: number;
     indent: string;
     snippet: string;
     kind: TargetKind;
+    codeType: string;  // maps to [TYPE:xxx] tag for the model
 }
 
 const MAX_MODEL_SNIPPET_LINES = 80;
@@ -113,6 +114,93 @@ function buildRuleBasedComment(target: CommentTarget): string {
     const stringCode = target.snippet.toLowerCase();
     const firstLine = normalizeSpace(target.snippet.split(/\r?\n/)[0] || '');
 
+    // ── Loop comments ───────────────────────────────────────────────────
+    if (target.kind === 'loop') {
+        const lower = target.snippet.toLowerCase();
+        // Detect loop intent
+        if (/sum\(|\+=|total|count|accumulate/i.test(lower)) {
+            return 'Iterates to accumulate a running total across the collection.';
+        }
+        if (/filter|append|push|add\(/i.test(lower)) {
+            return 'Iterates to collect elements that match the selection criteria.';
+        }
+        if (/max\(|min\(|largest|smallest/i.test(lower)) {
+            return 'Iterates to find the extreme value in the collection.';
+        }
+        if (/sort|swap|compare/i.test(lower)) {
+            return 'Iterates to reorder elements according to the comparison logic.';
+        }
+        if (/print\(|log\(|write\(/i.test(lower)) {
+            return 'Iterates to process and output each element.';
+        }
+        // Extract the iterable from for-in/for-of
+        const forMatch = firstLine.match(/for\s+\w+\s+(?:in|of)\s+(.+?)\s*[:{]/i);
+        if (forMatch) {
+            const collection = forMatch[1].trim();
+            return `Iterates over ${collection} and processes each element.`;
+        }
+        const whileMatch = firstLine.match(/while\s+(.+?)\s*[:{]/i);
+        if (whileMatch) {
+            return `Continues processing while ${whileMatch[1].trim()}.`;
+        }
+        return 'Iterates through the collection and processes each element.';
+    }
+
+    // ── Complex logic comments ──────────────────────────────────────────
+    if (target.kind === 'complex_logic') {
+        const lower = target.snippet.toLowerCase();
+        if (/valid|check|assert|schema|required/i.test(lower)) {
+            return 'Validates the input and rejects cases that fail the rules.';
+        }
+        if (/error|except|catch|raise|throw/i.test(lower)) {
+            return 'Handles error conditions with appropriate recovery logic.';
+        }
+        if (/permission|auth|role|access/i.test(lower)) {
+            return 'Enforces access control based on the current permissions.';
+        }
+        if (/type\(|isinstance|typeof|switch|match/i.test(lower)) {
+            return 'Dispatches to the correct handler based on the input type.';
+        }
+        if (/retry|attempt|fallback|timeout/i.test(lower)) {
+            return 'Implements retry logic with fallback on failure.';
+        }
+        if (/null|none|undefined|empty/i.test(lower)) {
+            return 'Guards against null or missing values before proceeding.';
+        }
+        const branchCount = (lower.match(/elif|else\s+if|case\s/g) || []).length;
+        if (branchCount >= 2) {
+            return `Branches across ${branchCount + 1} cases to select the right execution path.`;
+        }
+        return 'Selects the execution path based on the evaluated condition.';
+    }
+
+    // ── Critical variable comments ──────────────────────────────────────
+    if (target.kind === 'variable') {
+        const varMatch = firstLine.match(/(?:const|let|var|)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)/);
+        if (varMatch) {
+            const varName = varMatch[1];
+            const rhs = varMatch[2].toLowerCase();
+            if (/config|setting|option|param|env/i.test(rhs)) {
+                return `${varName}: configuration value that controls downstream behavior.`;
+            }
+            if (/connect|client|session|pool|socket/i.test(rhs)) {
+                return `${varName}: connection handle used for subsequent operations.`;
+            }
+            if (/query|sql|select|cursor/i.test(rhs)) {
+                return `${varName}: query result that drives the processing logic.`;
+            }
+            if (/request|response|fetch|api|http/i.test(rhs)) {
+                return `${varName}: API response data used in further processing.`;
+            }
+            if (/path|file|dir|url|uri/i.test(rhs)) {
+                return `${varName}: resource path resolved for file or network access.`;
+            }
+            return `${varName}: computed value used in the subsequent logic.`;
+        }
+        return 'Stores a critical intermediate value for downstream use.';
+    }
+
+    // ── Original function/class logic ────────────────────────────────────
     if ((name && name.toLowerCase() === 'merge_sort') || (stringCode.includes('mid') && stringCode.includes('while') && stringCode.includes('sort'))) {
         return 'Recursively sorts the input list by splitting it into halves and merging them in ascending order.';
     }
@@ -285,6 +373,27 @@ function findCommentTargets(text: string, languageId: string, baseLine: number):
     const pyFnRe = /^\s*def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*:/;
     const methodRe = /^\s*(public\s+|private\s+|protected\s+|static\s+|async\s+)*[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*\{/;
 
+    // Loop patterns
+    const forRe = /^\s*(for\s*\(|for\s+\w+\s+(in|of)\s+)/;
+    const whileRe = /^\s*while\s*[\(]/;
+    const pyForRe = /^\s*for\s+\w+\s+in\s+/;
+    const pyWhileRe = /^\s*while\s+/;
+    const doWhileRe = /^\s*do\s*\{/;
+
+    // Complex logic patterns
+    const ifChainRe = /^\s*(if\s*\(|if\s+)/;
+    const pyIfRe = /^\s*if\s+/;
+    const tryCatchRe = /^\s*try\s*[:{]/;
+    const switchRe = /^\s*switch\s*\(/;
+    const matchRe = /^\s*match\s+/;
+
+    // Critical variable patterns
+    const jsVarRe = /^\s*(const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)/;
+    const pyVarRe = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^=].+)/;
+
+    // Trivial assignment RHS to skip
+    const trivialRhs = /^\s*(None|True|False|true|false|null|undefined|\d+|['"].{0,20}['"]|\[\]|\{\}|0|0\.0)\s*;?\s*$/;
+
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         const trimmed = line.trim();
@@ -295,7 +404,76 @@ function findCommentTargets(text: string, languageId: string, baseLine: number):
         const isClass = classRe.test(line) || pyClassRe.test(line);
         const isFunction = fnRe.test(line) || arrowFnRe.test(line) || pyFnRe.test(line) || (methodRe.test(line) && !/^(if|for|while|switch|catch)\b/.test(trimmed));
 
-        if (!isClass && !isFunction) {
+        // Detect loops
+        const isLoop = !isFunction && (
+            forRe.test(line) || whileRe.test(line) ||
+            pyForRe.test(line) || pyWhileRe.test(line) ||
+            doWhileRe.test(line)
+        );
+
+        // Detect complex logic (if-chains with >=2 elif/else if, try-catch, switch/match)
+        let isComplexLogic = false;
+        if (!isClass && !isFunction && !isLoop) {
+            if (tryCatchRe.test(line) || switchRe.test(line) || matchRe.test(line)) {
+                isComplexLogic = true;
+            } else if (ifChainRe.test(line) || pyIfRe.test(line)) {
+                // Count subsequent elif/else if branches to decide if it's "complex"
+                const blockEnd = getBlockEnd(lines, i, languageId);
+                let branchCount = 0;
+                for (let j = i; j <= blockEnd && j < lines.length; j++) {
+                    if (/^\s*(elif|else\s+if|else\s*\{|else\s*:)/.test(lines[j])) {
+                        branchCount++;
+                    }
+                }
+                // Also look at siblings after the block
+                const indent = (line.match(/^\s*/) || [''])[0].length;
+                for (let j = blockEnd + 1; j < lines.length; j++) {
+                    const sibLine = lines[j];
+                    const sibTrimmed = sibLine.trim();
+                    if (!sibTrimmed) { continue; }
+                    const sibIndent = (sibLine.match(/^\s*/) || [''])[0].length;
+                    if (sibIndent !== indent) { break; }
+                    if (/^(elif|else\s+if|else\s*\{|else\s*:)/.test(sibTrimmed)) {
+                        branchCount++;
+                    } else {
+                        break;
+                    }
+                }
+                if (branchCount >= 2) {
+                    isComplexLogic = true;
+                }
+            }
+        }
+
+        // Detect critical variable assignments
+        let isVariable = false;
+        if (!isClass && !isFunction && !isLoop && !isComplexLogic) {
+            const jsMatch = jsVarRe.exec(line);
+            const pyMatch = !jsMatch ? pyVarRe.exec(line) : null;
+            const match = jsMatch || pyMatch;
+            if (match) {
+                const varName = jsMatch ? jsMatch[2] : match[1];
+                const rhs = jsMatch ? jsMatch[3] : match[2];
+                // Skip trivial assignments
+                if (!trivialRhs.test(rhs) && varName.length >= 3) {
+                    // Check if this variable is used in return/condition/API call below
+                    const remaining = lines.slice(i + 1).join('\n');
+                    const isUsedCritically = (
+                        new RegExp(`\\breturn\\b.*\\b${varName}\\b`).test(remaining) ||
+                        new RegExp(`\\bif\\b.*\\b${varName}\\b`).test(remaining) ||
+                        new RegExp(`\\b${varName}\\b\\s*\\.\\s*\\w+\\s*\\(`).test(remaining) ||
+                        new RegExp(`\\bthrow\\b.*\\b${varName}\\b`).test(remaining) ||
+                        new RegExp(`\\braise\\b.*\\b${varName}\\b`).test(remaining) ||
+                        /\b(config|setting|session|client|connection|query|cursor|request|response)\b/i.test(rhs)
+                    );
+                    if (isUsedCritically) {
+                        isVariable = true;
+                    }
+                }
+            }
+        }
+
+        if (!isClass && !isFunction && !isLoop && !isComplexLogic && !isVariable) {
             continue;
         }
 
@@ -313,11 +491,32 @@ function findCommentTargets(text: string, languageId: string, baseLine: number):
 
         const indent = (line.match(/^\s*/) || [''])[0];
         const snippet = lines.slice(i, Math.min(end + 1, i + 120)).join('\n');
+
+        let kind: TargetKind;
+        let codeType: string;
+        if (isClass) {
+            kind = 'class';
+            codeType = 'function';  // classes use function-style prompts
+        } else if (isFunction) {
+            kind = 'function';
+            codeType = 'function';
+        } else if (isLoop) {
+            kind = 'loop';
+            codeType = 'loop';
+        } else if (isComplexLogic) {
+            kind = 'complex_logic';
+            codeType = 'complex_logic';
+        } else {
+            kind = 'variable';
+            codeType = 'variable';
+        }
+
         targets.push({
             line: absoluteLine,
             indent,
             snippet,
-            kind: isClass ? 'class' : 'function'
+            kind,
+            codeType,
         });
     }
 
@@ -402,8 +601,8 @@ export function activate(context: vscode.ExtensionContext) {
 
                 for (let i = 0; i < targets.length; i++) {
                     const target = targets[i];
-                    progress.report({ message: `Generating comment ${i + 1}/${targets.length}...` });
-                    const model = await generateComment(compactSnippet(target.snippet), () => undefined);
+                    progress.report({ message: `Generating comment ${i + 1}/${targets.length} (${target.kind})...` });
+                    const model = await generateComment(compactSnippet(target.snippet), () => undefined, target.codeType);
 
                     let selectedComment: string;
 
