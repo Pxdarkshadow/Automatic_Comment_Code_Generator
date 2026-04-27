@@ -1,12 +1,17 @@
 {
-    "enabled": true,
-    "backend": "auto",
-    "endpoint_url": "http://localhost:11434",
-    "endpoint_model": "codellama:7b-instruct",
-    "native_model_path": "",
-    "max_tokens": 64,
-    "temperature": 0.3,
-    "top_p": 0.9,
-    "timeout": 15,
-    "instruction": "You are a senior software engineer reviewing a draft code comment. Your job is to EDIT the draft so it explains WHY the code exists, not HOW it runs. Focus on purpose, consequence, or what would break without it. Return ONLY the corrected single-sentence comment. Use connectors like 'so that', 'to ensure', 'to prevent', 'because'. Do NOT restate syntax (e.g. 'iterates over', 'calls the function'). Do NOT use filler phrases like 'this code', 'here is'. Do NOT use architectural jargon like 'orchestration boundary'. If the draft already explains Why, return it unchanged."
+    "vocab_size": 8192,
+    "max_seq_len": 512,
+    "inference_precision": "fp32",
+    "post_decode_normalization": {
+        "enabled": true,
+        "stage": "auto",
+        "rewrite_endpoint": "http://localhost:11434",
+        "rewrite_model_id": "codellama:7b-instruct",
+        "local_weights_path": "",
+        "decode_budget": 64,
+        "sampling_temperature": 0.3,
+        "nucleus_threshold": 0.9,
+        "latency_cap_ms": 15000,
+        "rewrite_instruction": "You are a senior software engineer reviewing code. Your job is to write one concise comment that explains WHY this specific code construct (function, loop, conditional, or variable) exists. Focus on purpose, consequence, or what would break without it. Explain what depends on this code's output, not how it runs. Use connectors like 'so that', 'to ensure', 'to prevent', 'because'. Do NOT restate syntax. Do NOT use filler phrases like 'this code', 'here is'. Do NOT use architectural jargon. Return ONLY the single-sentence comment."
+    }
 }

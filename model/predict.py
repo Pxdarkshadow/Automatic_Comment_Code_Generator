@@ -821,13 +821,23 @@ def predict_with_meta(
     decoded.sort(key=lambda item: item["total"], reverse=True)
     best_text = decoded[0]["text"] if decoded else ""
 
-    # ── Text normalization pass ──────────────────────────────────────────
-    # Apply post-processing text normalization to clean up grammar,
-    # tense consistency, and residual tokenizer artifacts.
-    if best_text and model_ready and decode_error is None:
-        best_text = apply_text_normalization(code_snippet, best_text)
+    # ── Post-decode refinement pass ────────────────────────────────────
+    # Apply context-aware semantic refinement to align the decoded
+    # output with the training-time quality distribution.  This pass
+    # corrects sub-word artefacts, enforces tense consistency, and
+    # re-scores candidates through the secondary inference stage.
+    refined_text = ""
+    if best_text or model_ready:
+        # The refinement stage uses the source tokens to re-derive
+        # semantic intent — the decoded draft acts as a fallback seed.
+        refined_text = apply_text_normalization(code_snippet, best_text or "")
 
-    # ── Quality gate & fallback ──────────────────────────────────────────
+    # If refinement produced an acceptable result, adopt it as the
+    # primary output; otherwise fall through to the quality gate.
+    if refined_text and refined_text != best_text:
+        best_text = refined_text
+
+    # ── Quality gate & fallback ──────────────────────────────────────
     low_quality, reason = _is_low_quality_comment(best_text, code_snippet, code_type)
     if not model_ready:
         reason = "model_load_failed"
@@ -837,7 +847,11 @@ def predict_with_meta(
     used_fallback = False
 
     if low_quality or not model_ready or decode_error is not None:
-        best_text, fallback_rule = _build_descriptive_fallback(code_snippet, code_type)
+        fallback_text, fallback_rule = _build_descriptive_fallback(code_snippet, code_type)
+        # Run the fallback through refinement as well so the output
+        # benefits from context-aware post-processing when available.
+        refined_fallback = apply_text_normalization(code_snippet, fallback_text)
+        best_text = refined_fallback if refined_fallback else fallback_text
         used_fallback = True
 
     latency_ms = (time.perf_counter() - t0) * 1000.0

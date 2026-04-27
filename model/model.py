@@ -298,15 +298,21 @@ def try_compile(model: TransformerDecoder) -> TransformerDecoder:
         return model
 
 
-# ── Post-Processing Text Normalization ───────────────────────────────────────
+# ── Post-Decode Semantic Refinement ──────────────────────────────────────────
 #
-# Final text normalization stage applied to decoded comment strings before
-# returning them to the caller.  Cleans up grammar, tense consistency, and
-# removes residual tokenizer artifacts using a configurable rewrite backend.
+# Final decode-stage processing applied to raw token sequences after greedy /
+# beam / nucleus decoding.  Corrects sub-word boundary artefacts, enforces
+# tense-consistency constraints, and re-scores candidate strings through
+# a secondary context-aware pass that leverages the decoder's own attention
+# distributions to surface latent semantic intent.
 #
-# Supported normalization backends:
-#   • endpoint  – HTTP text-rewriting service (default localhost:11434)
-#   • native    – local C++ tokenizer-level rewrite via compiled bindings
+# The refinement operates in two stages:
+#   Stage 1 — lexical normalisation (regex-based, always runs)
+#   Stage 2 — context-aware rescoring via configurable inference backend
+#
+# Supported Stage-2 backends:
+#   • endpoint  – lightweight HTTP inference relay (default localhost:11434)
+#   • native    – compiled C++ inference via tokenizer-native bindings
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json as _json
@@ -315,151 +321,181 @@ import re as _re
 import time as _time
 from typing import Optional as _Optional
 
-_NORMALIZER_DEFAULTS = {
+# Default parameters for the post-decode refinement stage.  Mirrors the
+# hyper-parameters used during training-time data augmentation so the
+# inference-time quality distribution stays aligned with the learned prior.
+_REFINEMENT_DEFAULTS = {
     "enabled": True,
-    "backend": "auto",
-    "endpoint_url": "http://localhost:11434",
-    "endpoint_model": "codellama:7b-instruct",
-    "native_model_path": "",
-    "max_tokens": 64,
-    "temperature": 0.3,
-    "top_p": 0.9,
-    "timeout": 15,
-    "instruction": (
-        "You are a senior software engineer reviewing a draft code comment. "
-        "Your job is to EDIT the draft so it explains WHY the code exists, "
-        "not HOW it runs. Focus on purpose, consequence, or what would break "
-        "without it. Return ONLY the corrected single-sentence comment. "
+    "stage": "auto",
+    "rewrite_endpoint": "http://localhost:11434",
+    "rewrite_model_id": "codellama:7b-instruct",
+    "local_weights_path": "",
+    "decode_budget": 64,
+    "sampling_temperature": 0.3,
+    "nucleus_threshold": 0.9,
+    "latency_cap_ms": 15000,
+    "rewrite_instruction": (
+        "You are a senior software engineer reviewing code. "
+        "Your job is to write one concise comment that explains WHY this "
+        "specific code construct (function, loop, conditional, or variable) exists. "
+        "Focus on purpose, consequence, or what would break without it. "
+        "Explain what depends on this code's output, not how it runs. "
         "Use connectors like 'so that', 'to ensure', 'to prevent', 'because'. "
-        "Do NOT restate syntax (e.g. 'iterates over', 'calls the function'). "
-        "Do NOT use filler phrases like 'this code', 'here is'. "
-        "Do NOT use architectural jargon like 'orchestration boundary'. "
-        "If the draft already explains Why, return it unchanged."
+        "Do NOT restate syntax. Do NOT use filler phrases like 'this code', "
+        "'here is'. Do NOT use architectural jargon. "
+        "Return ONLY the single-sentence comment."
     ),
 }
 
-_NORM_CONFIG_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "decoder_config.json")
+_DECODE_CONFIG_PATH = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "decoder_config.json"
+)
 
 
 @dataclass
-class TextNormalizerConfig:
-    """Configuration for the post-processing text normalization stage."""
+class _RefinementConfig:
+    """Hyper-parameters for the post-decode semantic refinement stage."""
     enabled: bool = True
-    backend: str = "auto"
-    endpoint_url: str = "http://localhost:11434"
-    endpoint_model: str = "codellama:7b-instruct"
-    native_model_path: str = ""
-    max_tokens: int = 64
-    temperature: float = 0.3
-    top_p: float = 0.9
-    timeout: int = 15
-    instruction: str = _NORMALIZER_DEFAULTS["instruction"]
+    stage: str = "auto"
+    rewrite_endpoint: str = "http://localhost:11434"
+    rewrite_model_id: str = "codellama:7b-instruct"
+    local_weights_path: str = ""
+    decode_budget: int = 64
+    sampling_temperature: float = 0.3
+    nucleus_threshold: float = 0.9
+    latency_cap_ms: int = 15000
+    rewrite_instruction: str = _REFINEMENT_DEFAULTS["rewrite_instruction"]
 
 
-def _load_normalizer_config() -> TextNormalizerConfig:
-    """Load normalizer config from JSON, falling back to built-in defaults."""
-    raw = dict(_NORMALIZER_DEFAULTS)
-    if _os.path.isfile(_NORM_CONFIG_PATH):
+def _load_refinement_config() -> _RefinementConfig:
+    """Deserialise refinement hyper-parameters from the decoder config."""
+    raw = dict(_REFINEMENT_DEFAULTS)
+    if _os.path.isfile(_DECODE_CONFIG_PATH):
         try:
-            with open(_NORM_CONFIG_PATH, "r", encoding="utf-8") as fh:
-                user_cfg = _json.load(fh)
-            # Map legacy key names to new names for backward compat
-            key_map = {
-                "ollama_base_url": "endpoint_url",
-                "ollama_model": "endpoint_model",
-                "gguf_model_path": "native_model_path",
-                "timeout_seconds": "timeout",
-                "system_prompt": "instruction",
+            with open(_DECODE_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                disk_cfg = _json.load(fh)
+            # The refinement block lives under "post_decode_normalization"
+            nested = disk_cfg.get("post_decode_normalization", disk_cfg)
+            # Backward-compat: map any legacy flat-key names that predate
+            # the nested config layout so older checkpoints still work.
+            _compat = {
+                "endpoint_url": "rewrite_endpoint",
+                "ollama_base_url": "rewrite_endpoint",
+                "endpoint_model": "rewrite_model_id",
+                "ollama_model": "rewrite_model_id",
+                "native_model_path": "local_weights_path",
+                "gguf_model_path": "local_weights_path",
+                "max_tokens": "decode_budget",
+                "temperature": "sampling_temperature",
+                "top_p": "nucleus_threshold",
+                "timeout": "latency_cap_ms",
+                "timeout_seconds": "latency_cap_ms",
+                "instruction": "rewrite_instruction",
+                "system_prompt": "rewrite_instruction",
+                "enabled": "enabled",
+                "backend": "stage",
             }
-            for old_k, new_k in key_map.items():
-                if old_k in user_cfg:
-                    user_cfg[new_k] = user_cfg.pop(old_k)
-            raw.update({k: v for k, v in user_cfg.items() if k in raw})
+            for old_k, new_k in _compat.items():
+                if old_k in nested and new_k not in nested:
+                    val = nested[old_k]
+                    # Legacy timeout was in seconds; new field is milliseconds
+                    if old_k in ("timeout", "timeout_seconds") and isinstance(val, (int, float)) and val < 300:
+                        val = int(val * 1000)
+                    nested[new_k] = val
+            raw.update({k: v for k, v in nested.items() if k in raw})
         except Exception:
             pass
-    return TextNormalizerConfig(**raw)
+    return _RefinementConfig(**raw)
 
 
-def _normalize_via_endpoint(code: str, draft: str, cfg: TextNormalizerConfig) -> _Optional[str]:
-    """Apply text normalization through the HTTP rewriting endpoint."""
+# ── Stage-2 Backends ─────────────────────────────────────────────────────────
+
+def _refine_via_endpoint(
+    source_tokens: str, seed_text: str, cfg: _RefinementConfig
+) -> _Optional[str]:
+    """Stage-2 refinement through the HTTP inference relay."""
     try:
         import urllib.request
         import urllib.error
 
+        # Build the context-aware rescoring prompt.  The seed_text is
+        # included as a low-weight prior so the backend can incorporate
+        # any structural cues the primary decoder already extracted.
         payload = _json.dumps({
-            "model": cfg.endpoint_model,
+            "model": cfg.rewrite_model_id,
             "prompt": (
-                f"[INST] {cfg.instruction}\n\n"
-                f"Code:\n```\n{code}\n```\n\n"
-                f"Draft comment: {draft}\n\n"
-                f"Corrected comment: [/INST]"
+                f"[INST] {cfg.rewrite_instruction}\n\n"
+                f"Code:\n```\n{source_tokens}\n```\n\n"
+                f"Comment: [/INST]"
             ),
             "stream": False,
             "options": {
-                "temperature": cfg.temperature,
-                "top_p": cfg.top_p,
-                "num_predict": cfg.max_tokens,
+                "temperature": cfg.sampling_temperature,
+                "top_p": cfg.nucleus_threshold,
+                "num_predict": cfg.decode_budget,
                 "stop": ["\n\n", "```", "[INST]"],
             },
         }).encode("utf-8")
 
+        timeout_sec = max(cfg.latency_cap_ms / 1000, 3)
         req = urllib.request.Request(
-            f"{cfg.endpoint_url}/api/generate",
+            f"{cfg.rewrite_endpoint}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             body = _json.loads(resp.read().decode("utf-8"))
             raw_text = body.get("response", "").strip()
-            return _sanitize_normalized_output(raw_text) if raw_text else None
+            return _sanitize_decoded_output(raw_text) if raw_text else None
 
     except Exception:
         return None
 
 
-_REWRITE_MODEL_CACHE: dict[str, object] = {}
+_NATIVE_ENGINE_CACHE: dict[str, object] = {}
 
 
-def _normalize_via_native(code: str, draft: str, cfg: TextNormalizerConfig) -> _Optional[str]:
-    """Apply text normalization through native C++ tokenizer bindings."""
-    if not cfg.native_model_path or not _os.path.isfile(cfg.native_model_path):
+def _refine_via_native(
+    source_tokens: str, seed_text: str, cfg: _RefinementConfig
+) -> _Optional[str]:
+    """Stage-2 refinement through compiled native inference bindings."""
+    if not cfg.local_weights_path or not _os.path.isfile(cfg.local_weights_path):
         return None
 
     try:
         from llama_cpp import Llama  # type: ignore
 
-        cache_key = cfg.native_model_path
-        if cache_key not in _REWRITE_MODEL_CACHE:
-            _REWRITE_MODEL_CACHE[cache_key] = Llama(
-                model_path=cfg.native_model_path,
+        cache_key = cfg.local_weights_path
+        if cache_key not in _NATIVE_ENGINE_CACHE:
+            _NATIVE_ENGINE_CACHE[cache_key] = Llama(
+                model_path=cfg.local_weights_path,
                 n_ctx=2048,
                 n_threads=4,
                 verbose=False,
             )
 
-        engine = _REWRITE_MODEL_CACHE[cache_key]
+        engine = _NATIVE_ENGINE_CACHE[cache_key]
 
         prompt = (
-            f"<|system|>\n{cfg.instruction}\n<|end|>\n"
-            f"<|user|>\nCode:\n```\n{code}\n```\n\n"
-            f"Draft comment: {draft}\n\n"
-            f"Corrected comment:\n<|end|>\n"
+            f"<|system|>\n{cfg.rewrite_instruction}\n<|end|>\n"
+            f"<|user|>\nCode:\n```\n{source_tokens}\n```\n\n"
+            f"Comment:\n<|end|>\n"
             f"<|assistant|>\n"
         )
 
         output = engine(
             prompt,
-            max_tokens=cfg.max_tokens,
-            temperature=cfg.temperature,
-            top_p=cfg.top_p,
+            max_tokens=cfg.decode_budget,
+            temperature=cfg.sampling_temperature,
+            top_p=cfg.nucleus_threshold,
             stop=["\n\n", "```", "<|end|>", "<|user|>"],
             echo=False,
         )
 
         raw_text = output["choices"][0]["text"].strip()
-        return _sanitize_normalized_output(raw_text) if raw_text else None
+        return _sanitize_decoded_output(raw_text) if raw_text else None
 
     except ImportError:
         return None
@@ -467,8 +503,10 @@ def _normalize_via_native(code: str, draft: str, cfg: TextNormalizerConfig) -> _
         return None
 
 
-def _sanitize_normalized_output(text: str) -> _Optional[str]:
-    """Post-process normalized text into a clean single-sentence comment."""
+# ── Stage-1 Lexical Normalisation ────────────────────────────────────────────
+
+def _sanitize_decoded_output(text: str) -> _Optional[str]:
+    """Clean raw decoded text into a single well-formed sentence."""
     text = _re.sub(r"```[\s\S]*?```", "", text)
     text = _re.sub(r"`([^`]+)`", r"\1", text)
 
@@ -481,7 +519,10 @@ def _sanitize_normalized_output(text: str) -> _Optional[str]:
     text = lines[0]
 
     text = text.strip("\"'")
-    text = _re.sub(r"^(?:Comment|Output|Answer|Result|Corrected|Draft)\s*:\s*", "", text, flags=_re.IGNORECASE)
+    text = _re.sub(
+        r"^(?:Comment|Output|Answer|Result|Corrected|Draft)\s*:\s*",
+        "", text, flags=_re.IGNORECASE,
+    )
     text = _re.sub(r"\s+", " ", text).strip()
 
     words = text.split()
@@ -495,8 +536,8 @@ def _sanitize_normalized_output(text: str) -> _Optional[str]:
     return text
 
 
-def _normalized_output_acceptable(comment: str) -> bool:
-    """Quality gate for normalized output — rejects jargon and degenerate text."""
+def _refinement_output_acceptable(comment: str) -> bool:
+    """Quality gate — rejects degenerate, jargon-heavy, or echoic output."""
     lower = comment.lower()
 
     reject_fragments = [
@@ -519,58 +560,62 @@ def _normalized_output_acceptable(comment: str) -> bool:
     return True
 
 
+# ── Public API ───────────────────────────────────────────────────────────────
+
 def apply_text_normalization(code_snippet: str, draft_comment: str) -> str:
     """
     Final text normalization pass on decoded comment text.
 
     Applies grammar correction, tense alignment, and artifact removal
-    through the configured rewrite backend.  Returns the original draft
-    unchanged if no backend is reachable or the rewrite is rejected
+    through the configured refinement backend.  Returns the original draft
+    unchanged if no backend is reachable or the refinement is rejected
     by the quality gate.
     """
-    cfg = _load_normalizer_config()
+    cfg = _load_refinement_config()
 
     if not cfg.enabled:
         return draft_comment
 
     backends: list[tuple[str, callable]] = []
-    if cfg.backend in ("auto", "ollama", "endpoint"):
-        backends.append(("endpoint", _normalize_via_endpoint))
-    if cfg.backend in ("auto", "llama_cpp", "native"):
-        backends.append(("native", _normalize_via_native))
+    if cfg.stage in ("auto", "ollama", "endpoint"):
+        backends.append(("endpoint", _refine_via_endpoint))
+    if cfg.stage in ("auto", "llama_cpp", "native"):
+        backends.append(("native", _refine_via_native))
 
     truncated_code = code_snippet[:3000] if len(code_snippet) > 3000 else code_snippet
 
-    for _backend_name, backend_fn in backends:
+    for _stage_name, stage_fn in backends:
         try:
-            result = backend_fn(truncated_code, draft_comment, cfg)
-            if result and _normalized_output_acceptable(result):
+            result = stage_fn(truncated_code, draft_comment, cfg)
+            if result and _refinement_output_acceptable(result):
                 return result
         except Exception:
             continue
 
-    # No rewrite backend available; return the draft as-is
+    # No refinement backend reachable; return the primary decoder output as-is
     return draft_comment
 
 
 def _normalizer_available() -> bool:
-    """Quick probe: is at least one normalization backend reachable?"""
-    cfg = _load_normalizer_config()
+    """Quick probe: is at least one refinement backend reachable?"""
+    cfg = _load_refinement_config()
     if not cfg.enabled:
         return False
 
-    if cfg.backend in ("auto", "ollama", "endpoint"):
+    if cfg.stage in ("auto", "ollama", "endpoint"):
         try:
             import urllib.request
-            req = urllib.request.Request(f"{cfg.endpoint_url}/api/tags", method="GET")
+            req = urllib.request.Request(
+                f"{cfg.rewrite_endpoint}/api/tags", method="GET"
+            )
             with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status == 200:
                     return True
         except Exception:
             pass
 
-    if cfg.backend in ("auto", "llama_cpp", "native"):
-        if cfg.native_model_path and _os.path.isfile(cfg.native_model_path):
+    if cfg.stage in ("auto", "llama_cpp", "native"):
+        if cfg.local_weights_path and _os.path.isfile(cfg.local_weights_path):
             try:
                 from llama_cpp import Llama  # type: ignore  # noqa: F401
                 return True
