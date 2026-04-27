@@ -58,21 +58,21 @@ class DecodeConfig:
 # ── System Instruction ───────────────────────────────────────────────────────
 
 SYSTEM_INSTRUCTION = (
-    "Generate one concise code comment sentence that explains WHY the code exists.\n"
-    "Do NOT describe how the code runs or restate the syntax.\n"
-    "Instead, explain the purpose, the consequence if removed, or the business reason.\n"
+    "Generate one concise code comment that blends HOW the code works with WHY it was written.\n"
+    "Start by describing the mechanism briefly, then explain the purpose or reason.\n"
     "The code element may be a function, loop, logic block, or variable assignment.\n"
-    "For loops: explain what depends on the loop's output, not that it iterates.\n"
-    "For logic blocks: explain what is protected or what would fail without the check.\n"
-    "For variable assignments: explain what downstream code depends on this value.\n"
-    "Good: 'Rejects malformed input early to prevent parsing failures downstream.'\n"
+    "For functions: describe what the function does and why that operation matters.\n"
+    "For loops: describe what is iterated and why the iteration is needed.\n"
+    "For logic blocks: describe what is checked and what it protects against.\n"
+    "For variables: describe what value is stored and why it is needed later.\n"
+    "Good: 'Iterates through each row and prints cells separated by pipes to render a readable grid.'\n"
+    "Good: 'Checks all rows, columns, and diagonals for matching marks to determine the winner.'\n"
     "Bad:  'Iterates over the list and checks each element.'\n"
-    "Good: 'Pre-sorts results so the UI displays the most urgent items first.'\n"
-    "Bad:  'Sorts the array in ascending order.'\n"
+    "Bad:  'Processes the input and returns the result for this operation.'\n"
     "Output requirements:\n"
     "1. Produce exactly one sentence.\n"
-    "2. Focus on WHY, not HOW.\n"
-    "3. Use phrases like 'so that', 'to ensure', 'to prevent', 'because', 'before'.\n"
+    "2. Be specific to the actual code — mention real variable/function names when useful.\n"
+    "3. Avoid generic phrases like 'processes the input', 'for this operation'.\n"
     "4. Do not use filler phrases such as 'this code', 'here is', or 'the function'.\n"
     "5. Avoid architectural jargon like orchestration boundary, subsystem transition.\n"
 )
@@ -495,138 +495,156 @@ def _extract_intents(code: str) -> list[str]:
 
 
 def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple[str, str]:
-    """Generate a deterministic purpose-driven comment explaining WHY the code exists."""
+    """Generate a deterministic how+why comment describing what the code does and why."""
     code_lower = code.lower()
 
     # ── Loop fallback ────────────────────────────────────────────────────
     if code_type == "loop":
         if any(k in code_lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
-            return ("Computes the aggregate so downstream calculations have the total they need.", "intent:loop_accumulate")
+            return ("Accumulates a running total by adding each element, used to compute the final aggregate.", "intent:loop_accumulate")
         if any(k in code_lower for k in ["filter", "append", "push", "add("]):
-            return ("Isolates qualifying items so only valid entries proceed to the next step.", "intent:loop_filter")
+            return ("Scans each element and collects those matching the criteria into a filtered result set.", "intent:loop_filter")
         if any(k in code_lower for k in ["max(", "min(", "largest", "smallest"]):
-            return ("Identifies the boundary value the caller requires for its decision.", "intent:loop_extreme")
+            return ("Compares elements on each pass to find the extreme value needed by the caller.", "intent:loop_extreme")
         if any(k in code_lower for k in ["sort", "swap", "compare"]):
-            return ("Establishes the correct ordering before the result is consumed.", "intent:loop_sort")
+            return ("Repeatedly compares and swaps adjacent elements to arrange them in the correct order.", "intent:loop_sort")
         if any(k in code_lower for k in ["print(", "log(", "write("]):
-            return ("Emits each record so progress is observable and auditable.", "intent:loop_output")
-        for_match = re.search(r"for\s+\w+\s+in\s+(.+?)\s*[:{]", code)
+            return ("Steps through each element and outputs it so the user can see the current state.", "intent:loop_output")
+        for_match = re.search(r"for\s+(\w+)\s+in\s+(.+?)\s*[:{]", code)
         if for_match:
-            collection = for_match.group(1).strip().rstrip(":")
-            return (f"Walks {collection} to prepare the dataset for the operation that follows.", "intent:loop_iterate")
+            var = for_match.group(1)
+            collection = for_match.group(2).strip().rstrip(":")
+            return (f"Iterates over {collection}, processing each {var} to build or transform the result.", "intent:loop_iterate")
         while_match = re.search(r"while\s+(.+?)\s*[:{]", code)
         if while_match:
             condition = while_match.group(1).strip().rstrip(":")
-            return (f"Keeps running while {condition} because the task is not yet complete.", "intent:loop_while")
-        return ("Prepares the dataset for the operation that follows.", "intent:loop_generic")
+            return (f"Repeats the body while {condition}, allowing the loop to run until the exit condition is met.", "intent:loop_while")
+        return ("Iterates through the collection, processing each element to build the result.", "intent:loop_generic")
 
     # ── Complex logic fallback ───────────────────────────────────────────
     if code_type == "complex_logic":
         if any(k in code_lower for k in ["valid", "check", "assert", "schema", "required"]):
-            return ("Rejects malformed input early to prevent downstream parsing failures.", "intent:logic_validate")
+            return ("Validates the input against expected rules and rejects malformed data before further processing.", "intent:logic_validate")
         if any(k in code_lower for k in ["error", "except", "catch", "raise", "throw"]):
-            return ("Contains failures gracefully so the caller receives a clear error signal.", "intent:logic_error")
+            return ("Wraps the operation in error handling to catch exceptions and provide a meaningful recovery path.", "intent:logic_error")
         if any(k in code_lower for k in ["permission", "auth", "role", "access"]):
-            return ("Restricts access to authorized users before any state changes occur.", "intent:logic_auth")
+            return ("Checks authorization credentials to restrict access before allowing state changes.", "intent:logic_auth")
         if any(k in code_lower for k in ["type(", "isinstance", "typeof", "switch", "match"]):
-            return ("Routes to the correct handler because each type requires different processing.", "intent:logic_dispatch")
+            return ("Inspects the type or value to dispatch to the correct handler for each variant.", "intent:logic_dispatch")
         if any(k in code_lower for k in ["retry", "attempt", "fallback", "timeout"]):
-            return ("Tolerates transient failures by retrying before giving up.", "intent:logic_retry")
+            return ("Attempts the operation and retries on transient failures to improve reliability.", "intent:logic_retry")
         if any(k in code_lower for k in ["null", "none", "undefined", "empty"]):
-            return ("Prevents null-reference errors that would crash the caller.", "intent:logic_guard")
+            return ("Guards against null or missing values to prevent crashes in downstream code.", "intent:logic_guard")
         branch_count = code_lower.count("elif") + code_lower.count("else if") + code_lower.count("case ")
         if branch_count >= 2:
-            return (f"Handles {branch_count + 1} distinct scenarios that each require different treatment.", "intent:logic_branch")
-        return ("Chooses the correct path because the outcome differs by condition.", "intent:logic_generic")
+            return (f"Evaluates {branch_count + 1} distinct conditions and routes to the matching branch for each scenario.", "intent:logic_branch")
+        return ("Evaluates the condition and selects the appropriate execution path based on the result.", "intent:logic_generic")
 
     # ── Variable fallback ────────────────────────────────────────────────
     if code_type == "variable":
         var_match = re.search(r"(?:const|let|var|)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", code)
         if var_match:
             var_name = var_match.group(1)
-            rhs = var_match.group(2).lower()
-            if any(k in rhs for k in ["config", "setting", "option", "param", "env"]):
-                return (f"{var_name}: captures the configuration that governs how the pipeline behaves.", "intent:var_config")
-            if any(k in rhs for k in ["connect", "client", "session", "pool", "socket"]):
-                return (f"{var_name}: establishes the connection all subsequent calls depend on.", "intent:var_connection")
-            if any(k in rhs for k in ["query", "sql", "select", "cursor"]):
-                return (f"{var_name}: fetches the data that the remaining logic transforms and returns.", "intent:var_query")
-            if any(k in rhs for k in ["request", "response", "fetch", "api", "http"]):
-                return (f"{var_name}: retrieves the external data needed before processing can continue.", "intent:var_api")
-            if any(k in rhs for k in ["path", "file", "dir", "url", "uri"]):
-                return (f"{var_name}: resolves the target location so readers and writers operate correctly.", "intent:var_path")
-            return (f"{var_name}: stores a value that later steps depend on.", "intent:var_computed")
-        return ("Stores a critical intermediate value that later steps depend on.", "intent:var_generic")
+            rhs = var_match.group(2).strip()
+            rhs_lower = rhs.lower()
+            if any(k in rhs_lower for k in ["config", "setting", "option", "param", "env"]):
+                return (f"{var_name}: loads configuration settings that control how the rest of the pipeline behaves.", "intent:var_config")
+            if any(k in rhs_lower for k in ["connect", "client", "session", "pool", "socket"]):
+                return (f"{var_name}: opens a connection that all subsequent operations use to communicate.", "intent:var_connection")
+            if any(k in rhs_lower for k in ["query", "sql", "select", "cursor"]):
+                return (f"{var_name}: executes a query and stores the result for the logic that follows.", "intent:var_query")
+            if any(k in rhs_lower for k in ["request", "response", "fetch", "api", "http"]):
+                return (f"{var_name}: fetches data from an external source needed for the next processing step.", "intent:var_api")
+            if any(k in rhs_lower for k in ["path", "file", "dir", "url", "uri"]):
+                return (f"{var_name}: resolves the file or network path that readers and writers target.", "intent:var_path")
+            if any(k in rhs_lower for k in ["input(", "raw_input", "readline", "stdin"]):
+                return (f"{var_name}: reads user input from the console to drive the next action.", "intent:var_input")
+            if any(k in rhs_lower for k in ["[]", "list(", "dict(", "{}"]):
+                return (f"{var_name}: initializes a data structure that collects results during processing.", "intent:var_collection")
+            # Try to describe the RHS briefly
+            rhs_short = rhs[:60].rstrip()
+            return (f"{var_name}: computes {rhs_short} and stores the result for use in later steps.", "intent:var_computed")
+        return ("Stores an intermediate result that the following logic depends on.", "intent:var_generic")
 
-    # ── Function/class fallback (purpose-driven) ─────────────────────────
+    # ── Function/class fallback ──────────────────────────────────────────
     function_name = _extract_function_name(code) or "System"
     lower_name = function_name.lower()
+    params = _extract_params(code)
 
     if "merge_sort" in lower_name or ("sort" in lower_name and "mid" in code_lower and "len(" in code_lower):
         return (
-            "Establishes the correct ordering so consumers receive results in the expected sequence.",
+            "Recursively splits the list into halves and merges them back in sorted order.",
             "intent:merge_sort",
         )
 
     if any(token in code_lower for token in ["quick_sort", "quicksort", "pivot"]) and "sort" in lower_name:
         return (
-            "Establishes the correct ordering so consumers receive results in the expected sequence.",
+            "Partitions elements around a pivot and recursively sorts each partition for efficient ordering.",
             "intent:quick_sort",
         )
 
     if any(token in code_lower for token in ["binary_search", "mid", "left", "right"]) and "search" in lower_name:
         return (
-            "Locates the target efficiently to satisfy the lookup request.",
+            "Halves the search range on each step using binary search to locate the target efficiently.",
             "intent:binary_search",
         )
 
     if any(token in code_lower for token in ["auth", "login", "token", "credential", "session", "oauth"]):
         return (
-            "Verifies identity so only authorized users can proceed.",
+            "Verifies user credentials against stored records to grant or deny access.",
             "intent:auth_flow",
         )
 
     if any(token in code_lower for token in ["api", "http", "request", "response", "client", "endpoint", "network", "fetch("]):
         return (
-            "Retrieves external data needed before the next processing step can run.",
+            "Sends a request to an external service and returns the response for further processing.",
             "intent:api_fetch",
         )
 
     if any(token in code_lower for token in ["cache", "store", "db", "database", "repository", "persist", "save", "load", "read(", "write("]):
         return (
-            "Persists or retrieves data so state survives across invocations.",
+            "Reads from or writes to persistent storage so data survives across program runs.",
             "intent:data_persistence",
         )
 
     if any(token in code_lower for token in ["react", "jsx", "tsx", "component", "view", "screen", "render", "chart", "table"]):
         return (
-            "Renders the UI so the user can see and interact with the current state.",
+            "Builds and returns the visual elements that display the current data to the user.",
             "intent:ui_rendering",
         )
 
-    params = _extract_params(code)
-    param_phrase = ""
-    if params:
-        param_phrase = " the input" if len(params) == 1 else " the inputs"
-
+    # ── Name-based intent detection with how+why phrasing ────────────────
     intents = _extract_intents(code)
+    param_list = ", ".join(params[:3]) if params else ""
+    param_of = f" the given {param_list}" if param_list else ""
 
+    if any(token in lower_name for token in ["print", "display", "show", "draw", "render"]):
+        return (f"Formats and outputs{param_of} to display the current state to the user.", "intent:display")
     if any(token in lower_name for token in ["sort", "order", "rank"]):
-        return (f"Establishes the correct ordering so the consumer receives results in the expected sequence.", "intent:sorting")
+        return (f"Rearranges{param_of} into the expected order for correct downstream behavior.", "intent:sorting")
     if any(token in lower_name for token in ["filter", "select", "match"]):
-        return (f"Isolates qualifying entries so only valid items proceed.", "intent:filtering")
-    if any(token in lower_name for token in ["validate", "check", "verify"]):
-        return (f"Rejects invalid{param_phrase} early to prevent downstream errors.", "intent:validation")
+        return (f"Examines each element in{param_of} and keeps only those meeting the criteria.", "intent:filtering")
+    if any(token in lower_name for token in ["validate", "check", "verify", "winner", "win"]):
+        return (f"Inspects{param_of} against the defined rules and returns whether the condition is met.", "intent:validation")
+    if any(token in lower_name for token in ["is_", "has_", "can_"]):
+        return (f"Tests whether{param_of} satisfies a specific condition and returns a boolean.", "intent:predicate")
+    if any(token in lower_name for token in ["full", "empty", "complete", "done", "finished"]):
+        return (f"Checks whether{param_of} has reached capacity or completion.", "intent:state_check")
     if any(token in lower_name for token in ["format", "parse", "convert", "normalize", "transform"]):
-        return (f"Reshapes{param_phrase} into the format expected by the consumer.", "intent:data_transformation")
+        return (f"Converts{param_of} into the expected format for the next stage.", "intent:data_transformation")
     if any(token in lower_name for token in ["load", "fetch", "read", "save", "write"]):
-        return (f"Persists or retrieves data so state survives across invocations.", "intent:data_flow")
-    if any(token in lower_name for token in ["render", "view", "list", "table", "card", "item"]):
-        return ("Renders the UI so the user can see and interact with the data.", "intent:ui_rendering")
+        return (f"Reads or writes{param_of} to keep state synchronized with storage.", "intent:data_flow")
+    if any(token in lower_name for token in ["init", "setup", "create", "build", "make"]):
+        return (f"Constructs and initializes the required structure from{param_of} before use.", "intent:initialization")
+    if any(token in lower_name for token in ["main", "run", "start", "execute", "play"]):
+        return (f"Entry point that orchestrates the program flow by calling each step in sequence.", "intent:entry_point")
     if "aggregation" in intents:
-        return ("Computes the aggregate needed by the caller.", "intent:aggregation")
+        return (f"Combines multiple values from{param_of} into a single aggregate result.", "intent:aggregation")
 
-    return (f"Processes{param_phrase} to produce the result the caller depends on.", "intent:concise_summary")
+    # ── Generic fallback with parameter awareness ────────────────────────
+    if params:
+        return (f"Takes {param_list} and produces the result needed by the calling code.", "intent:concise_summary")
+    return (f"Performs the core operation and returns the result to the caller.", "intent:concise_summary")
 
 
 def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "function") -> tuple[bool, str | None]:
@@ -720,15 +738,24 @@ def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "func
 
 
 def _score_comment_text(comment: str, code: str) -> float:
-    """Heuristic re-ranking score for candidate comments, preferring 'Why' over 'How'."""
+    """Heuristic re-ranking score for candidate comments, preferring specific how+why blends."""
     lower = comment.lower()
     score = 0.0
 
     # Reward purpose-driven phrasing ("Why" connectors)
     if any(w in lower for w in ["so that", "to ensure", "to prevent", "because", "before ",
                                  "to avoid", "so the", "so only", "needed by", "depends on",
-                                 "required by", "expected by", "survives", "without this"]):
+                                 "required by", "expected by", "survives", "without this",
+                                 "allowing", "in order to", "used to", "to build",
+                                 "to determine", "to display", "to compute", "to drive"]):
         score += 2.0
+
+    # Reward specific mechanism descriptions (how + context)
+    if any(w in lower for w in ["iterates over", "steps through", "accumulates",
+                                 "compares", "checks all", "scans each", "formats and",
+                                 "reads from", "writes to", "builds and returns",
+                                 "partitions", "recursively", "evaluates"]):
+        score += 1.5
 
     # Moderate reward for action verbs with consequence context
     if any(w in lower for w in ["sort", "filter", "validate", "format", "parse", "load", "save", "merge", "render", "return"]):
@@ -739,8 +766,10 @@ def _score_comment_text(comment: str, code: str) -> float:
         score -= 1.5
     if any(bad in lower for bad in ["orchestration boundary", "domain orchestration", "subsystem", "macro-architecture"]):
         score -= 1.5
-    # Penalize mechanical descriptions that lack purpose
-    if re.match(r"^(iterates?|loops?|calls?|creates?)\s+", lower) and "to " not in lower and "so " not in lower:
+    # Penalize completely generic comments
+    if any(bad in lower for bad in ["processes the input and returns the result",
+                                     "for this operation",
+                                     "processes each element."]):
         score -= 1.0
 
     name = _extract_function_name(code)

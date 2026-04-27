@@ -113,65 +113,67 @@ function buildRuleBasedComment(target: CommentTarget): string {
     const name = extractIdentifier(target.snippet, target.kind);
     const stringCode = target.snippet.toLowerCase();
     const firstLine = normalizeSpace(target.snippet.split(/\r?\n/)[0] || '');
+    const params = extractParams(target.snippet);
+    const paramOf = params.length > 0 ? ` the given ${params.slice(0, 3).join(', ')}` : '';
 
     // ── Loop comments ───────────────────────────────────────────────────
     if (target.kind === 'loop') {
         const lower = target.snippet.toLowerCase();
-        // Detect loop intent
         if (/sum\(|\+=|total|count|accumulate/i.test(lower)) {
-            return 'Iterates to accumulate a running total across the collection.';
+            return 'Accumulates a running total by adding each element, used to compute the final aggregate.';
         }
         if (/filter|append|push|add\(/i.test(lower)) {
-            return 'Iterates to collect elements that match the selection criteria.';
+            return 'Scans each element and collects those matching the criteria into a filtered result set.';
         }
         if (/max\(|min\(|largest|smallest/i.test(lower)) {
-            return 'Iterates to find the extreme value in the collection.';
+            return 'Compares elements on each pass to find the extreme value needed by the caller.';
         }
         if (/sort|swap|compare/i.test(lower)) {
-            return 'Iterates to reorder elements according to the comparison logic.';
+            return 'Repeatedly compares and swaps adjacent elements to arrange them in the correct order.';
         }
         if (/print\(|log\(|write\(/i.test(lower)) {
-            return 'Iterates to process and output each element.';
+            return 'Steps through each element and outputs it so the user can see the current state.';
         }
-        // Extract the iterable from for-in/for-of
-        const forMatch = firstLine.match(/for\s+\w+\s+(?:in|of)\s+(.+?)\s*[:{]/i);
+        // Extract the iterable and loop variable from for-in/for-of
+        const forMatch = firstLine.match(/for\s+(\w+)\s+(?:in|of)\s+(.+?)\s*[:{]/i);
         if (forMatch) {
-            const collection = forMatch[1].trim();
-            return `Iterates over ${collection} and processes each element.`;
+            const loopVar = forMatch[1].trim();
+            const collection = forMatch[2].trim();
+            return `Iterates over ${collection}, processing each ${loopVar} to build or transform the result.`;
         }
         const whileMatch = firstLine.match(/while\s+(.+?)\s*[:{]/i);
         if (whileMatch) {
-            return `Continues processing while ${whileMatch[1].trim()}.`;
+            return `Repeats the body while ${whileMatch[1].trim()}, allowing the loop to run until the exit condition is met.`;
         }
-        return 'Iterates through the collection and processes each element.';
+        return 'Iterates through the collection, processing each element to build the result.';
     }
 
     // ── Complex logic comments ──────────────────────────────────────────
     if (target.kind === 'complex_logic') {
         const lower = target.snippet.toLowerCase();
         if (/valid|check|assert|schema|required/i.test(lower)) {
-            return 'Validates the input and rejects cases that fail the rules.';
+            return 'Validates the input against expected rules and rejects malformed data before further processing.';
         }
         if (/error|except|catch|raise|throw/i.test(lower)) {
-            return 'Handles error conditions with appropriate recovery logic.';
+            return 'Wraps the operation in error handling to catch exceptions and provide a meaningful recovery path.';
         }
         if (/permission|auth|role|access/i.test(lower)) {
-            return 'Enforces access control based on the current permissions.';
+            return 'Checks authorization credentials to restrict access before allowing state changes.';
         }
         if (/type\(|isinstance|typeof|switch|match/i.test(lower)) {
-            return 'Dispatches to the correct handler based on the input type.';
+            return 'Inspects the type or value to dispatch to the correct handler for each variant.';
         }
         if (/retry|attempt|fallback|timeout/i.test(lower)) {
-            return 'Implements retry logic with fallback on failure.';
+            return 'Attempts the operation and retries on transient failures to improve reliability.';
         }
         if (/null|none|undefined|empty/i.test(lower)) {
-            return 'Guards against null or missing values before proceeding.';
+            return 'Guards against null or missing values to prevent crashes in downstream code.';
         }
         const branchCount = (lower.match(/elif|else\s+if|case\s/g) || []).length;
         if (branchCount >= 2) {
-            return `Branches across ${branchCount + 1} cases to select the right execution path.`;
+            return `Evaluates ${branchCount + 1} distinct conditions and routes to the matching branch for each scenario.`;
         }
-        return 'Selects the execution path based on the evaluated condition.';
+        return 'Evaluates the condition and selects the appropriate execution path based on the result.';
     }
 
     // ── Critical variable comments ──────────────────────────────────────
@@ -179,30 +181,38 @@ function buildRuleBasedComment(target: CommentTarget): string {
         const varMatch = firstLine.match(/(?:const|let|var|)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)/);
         if (varMatch) {
             const varName = varMatch[1];
-            const rhs = varMatch[2].toLowerCase();
-            if (/config|setting|option|param|env/i.test(rhs)) {
-                return `${varName}: configuration value that controls downstream behavior.`;
+            const rhs = varMatch[2];
+            const rhsLower = rhs.toLowerCase();
+            if (/config|setting|option|param|env/i.test(rhsLower)) {
+                return `${varName}: loads configuration settings that control how the rest of the pipeline behaves.`;
             }
-            if (/connect|client|session|pool|socket/i.test(rhs)) {
-                return `${varName}: connection handle used for subsequent operations.`;
+            if (/connect|client|session|pool|socket/i.test(rhsLower)) {
+                return `${varName}: opens a connection that all subsequent operations use to communicate.`;
             }
-            if (/query|sql|select|cursor/i.test(rhs)) {
-                return `${varName}: query result that drives the processing logic.`;
+            if (/query|sql|select|cursor/i.test(rhsLower)) {
+                return `${varName}: executes a query and stores the result for the logic that follows.`;
             }
-            if (/request|response|fetch|api|http/i.test(rhs)) {
-                return `${varName}: API response data used in further processing.`;
+            if (/request|response|fetch|api|http/i.test(rhsLower)) {
+                return `${varName}: fetches data from an external source needed for the next processing step.`;
             }
-            if (/path|file|dir|url|uri/i.test(rhs)) {
-                return `${varName}: resource path resolved for file or network access.`;
+            if (/path|file|dir|url|uri/i.test(rhsLower)) {
+                return `${varName}: resolves the file or network path that readers and writers target.`;
             }
-            return `${varName}: computed value used in the subsequent logic.`;
+            if (/input\(|readline|prompt\(/i.test(rhsLower)) {
+                return `${varName}: reads user input from the console to drive the next action.`;
+            }
+            if (/\[\]|list\(|dict\(|\{\}/i.test(rhsLower)) {
+                return `${varName}: initializes a data structure that collects results during processing.`;
+            }
+            const rhsShort = rhs.trim().substring(0, 60);
+            return `${varName}: computes ${rhsShort} and stores the result for use in later steps.`;
         }
-        return 'Stores a critical intermediate value for downstream use.';
+        return 'Stores an intermediate result that the following logic depends on.';
     }
 
     // ── Original function/class logic ────────────────────────────────────
     if ((name && name.toLowerCase() === 'merge_sort') || (stringCode.includes('mid') && stringCode.includes('while') && stringCode.includes('sort'))) {
-        return 'Recursively sorts the input list by splitting it into halves and merging them in ascending order.';
+        return 'Recursively splits the list into halves and merges them back in sorted order.';
     }
 
     let domain = "the input";
@@ -232,33 +242,54 @@ function buildRuleBasedComment(target: CommentTarget): string {
         const isHook = name && name.startsWith('use');
 
         if (isComponent) {
-            return `Renders the UI for this feature using the current props and state.`;
+            return `Builds and returns the visual elements that display ${domain} to the user.`;
         }
         if (isHook) {
             return `Manages reusable state and derived behavior for this feature.`;
         }
         if (name) {
             const lowerName = name.toLowerCase();
+            if (lowerName.includes('print') || lowerName.includes('display') || lowerName.includes('show') || lowerName.includes('draw')) {
+                return `Formats and outputs${paramOf} to display the current state to the user.`;
+            }
+            if (lowerName.includes('main') || lowerName.includes('run') || lowerName.includes('start') || lowerName.includes('play')) {
+                return `Entry point that orchestrates the program flow by calling each step in sequence.`;
+            }
+            if (lowerName.includes('init') || lowerName.includes('setup') || lowerName.includes('create') || lowerName.includes('build')) {
+                return `Constructs and initializes the required structure${paramOf} before use.`;
+            }
             if (lowerName.includes('sort')) {
-                return `Sorts ${domain} into the expected order for later use.`;
+                return `Rearranges ${domain}${paramOf} into the expected order for correct downstream behavior.`;
             }
             if (lowerName.includes('filter') || lowerName.includes('select')) {
-                return `Filters ${domain} to keep only values that match the required criteria.`;
+                return `Examines each element in ${domain} and keeps only those meeting the required criteria.`;
+            }
+            if (lowerName.includes('winner') || lowerName.includes('win')) {
+                return `Inspects${paramOf} against the win conditions and returns whether a winner is found.`;
+            }
+            if (lowerName.startsWith('is_') || lowerName.startsWith('has_') || lowerName.startsWith('can_')) {
+                return `Tests a specific condition on${paramOf} and returns a boolean result.`;
+            }
+            if (lowerName.includes('full') || lowerName.includes('empty') || lowerName.includes('complete') || lowerName.includes('done')) {
+                return `Checks whether${paramOf} has reached capacity or completion.`;
             }
             if (lowerName.includes('validate') || lowerName.includes('check') || lowerName.includes('verify')) {
-                return `Validates ${domain} and returns whether it meets the expected rules.`;
+                return `Inspects ${domain}${paramOf} against the defined rules and returns whether the condition is met.`;
             }
             if (lowerName.includes('format') || lowerName.includes('parse') || lowerName.includes('convert') || lowerName.includes('normalize')) {
-                return `Transforms ${domain} into the expected format for downstream use.`;
+                return `Converts ${domain}${paramOf} into the expected format for the next stage.`;
             }
             if (lowerName.includes('load') || lowerName.includes('fetch') || lowerName.includes('read')) {
-                return `Loads ${domain} and returns it in a form the rest of the code can use.`;
+                return `Reads ${domain}${paramOf} from storage and returns it in a usable form.`;
             }
             if (lowerName.includes('save') || lowerName.includes('write')) {
-                return `Stores ${domain} and persists the updated result for later use.`;
+                return `Writes ${domain}${paramOf} to persistent storage for later retrieval.`;
             }
         }
-        return `Processes ${domain} and returns the result for this operation.`;
+        if (params.length > 0) {
+            return `Takes ${params.slice(0, 3).join(', ')} and produces the result needed by the calling code.`;
+        }
+        return `Performs the core operation and returns the result to the caller.`;
     }
 
     return `Processes ${firstLine || domain} for this operation.`;
