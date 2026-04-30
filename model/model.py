@@ -6,7 +6,7 @@ Architecture:
     → N × Pre-Norm TransformerBlock (CausalSelfAttention + FeedForward)
     → Final LayerNorm → Linear LM Head (vocab_size)
 
-The model receives a single concatenated sequence  "Code:\n{code}\n\nComment: {comment}"
+The model receives a single concatenated sequence  "{comment}\n{code}"
 and is trained to predict the next token at every position.  A causal mask ensures each
 position can only attend to itself and earlier positions.
 """
