@@ -213,7 +213,7 @@ The fallback path is also used when the local model emits empty, repetitive, or 
 
 ## License
 
-No explicit license file is currently present in the repository. 
+MIT License 
 
 ## Contact
 
