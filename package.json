@@ -1,9 +1,9 @@
 {
-  "name": "auto-comment",
+  "name": "auto-code-comment-generator",
   "displayName": "Auto Comment Code Generator",
   "description": "Automatically generates explanatory comments for your code using a local AI model.",
   "version": "0.0.1",
-  "publisher": "auto-comment-code-generator",
+  "publisher": "ShaunMathew",
   "license": "MIT",
   "engines": {
     "vscode": "^1.80.0"
