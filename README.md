@@ -96,7 +96,7 @@ All strategies support:
 ## Prerequisites
 
 - Windows/macOS/Linux
-- Python 3.11+ with PyTorch (CUDA recommended for training)
+- Python 3.11+ with PyTorch for local inference
 - Node.js 18+
 - VS Code 1.80+
 
@@ -170,19 +170,30 @@ python model/predict.py "..." --mode greedy
 
 ## VS Code Usage
 
-1. Open this project in VS Code.
-2. Run extension in debug mode (F5) or package/install extension.
-3. Open a code file and optionally select code.
-4. Run command: `Auto-Comment Code`.
-5. Generated comments are inserted above detected targets.
+1. Install the extension from a packaged VSIX or the VS Code Marketplace.
+2. Ensure the configured Python executable can import `torch`.
+3. If needed, set `autoComment.pythonPath` to the Python executable that has PyTorch installed.
+4. Open a code file and optionally select code.
+5. Run command: `Auto-Comment Code`.
+6. Generated comments are inserted above detected targets.
+
+## Marketplace Packaging Notes
+
+The extension is packaged from the compiled `dist/extension.js` bundle plus the local inference assets under `model/`.
+Training-only artifacts, telemetry logs, experiment manifests, source maps, virtual environments, and `.env` files are excluded by `.vscodeignore`.
+
+Before publishing, confirm that `publisher` in `package.json` matches the Azure DevOps Marketplace publisher ID that owns the extension.
 
 ## Fallback Behavior
 
 If the model checkpoint is missing, corrupted, or produces low-quality output:
 - Inference does **not** crash
-- Predictor falls back to deterministic semantic comments
+- Predictor falls back to a local LLM as a measure to generate high-context comments
 - Telemetry marks `fallback_reason: model_load_failed`
-- The extension continues to work with rule-based comments
+- The extension continues to work with these fallback mechanisms
+- **Note:** For better accuracy, please keep the internet on so the local LLM fallback can function optimally.
+
+The fallback path is also used when the local model emits empty, repetitive, or jargon-heavy text. It is intentionally pattern-aware for common return expressions, filters, predicates, loops, storage, API, and UI code so comments remain specific instead of generic.
 
 ## NPM Scripts
 

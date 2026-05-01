@@ -109,6 +109,58 @@ function extractParams(snippet: string): string[] {
         .filter(name => !!name && !['self', 'cls'].includes(name));
 }
 
+function splitIdentifierWords(name: string): string[] {
+    return name
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .split(/[_\s]+/)
+        .map(part => part.toLowerCase())
+        .filter(part => part.length > 1);
+}
+
+function describeReturnExpression(snippet: string, params: string[]): string | null {
+    const match = snippet.match(/\breturn\s+([^;\n]+)/);
+    if (!match) {
+        return null;
+    }
+
+    const expr = match[1].trim();
+    const operands = params.slice(0, 3).join(', ');
+    const listFilter = expr.match(/^\[(\w+)\s+for\s+(\w+)\s+in\s+(\w+)\s+if\s+(.+)\]$/);
+    if (listFilter) {
+        return `Filters ${listFilter[3]} to keep only entries where ${listFilter[4].trim()} is true.`;
+    }
+    const anyAll = expr.match(/^any\(all\((.+?)\)\s+for\s+(\w+)\s+in\s+(\w+)\)$/);
+    if (anyAll) {
+        return `Scans each ${anyAll[2]} in ${anyAll[3]} and returns whether every item satisfies ${anyAll[1].trim()}.`;
+    }
+    if (params.length >= 2 && new RegExp(`\\b${params[0]}\\b\\s*\\+\\s*\\b${params[1]}\\b`).test(expr)) {
+        return `Adds ${params[0]} and ${params[1]} to return their combined value to the caller.`;
+    }
+    if (params.length >= 2 && /[-*/%]/.test(expr) && params.slice(0, 2).every(param => expr.includes(param))) {
+        return `Combines ${operands} with the arithmetic expression \`${expr}\` to return the computed value.`;
+    }
+    if (/\.map\(|map\(/.test(expr)) {
+        return `Maps the input collection into a transformed result needed by the caller.`;
+    }
+    if (/\.filter\(|filter\(/.test(expr)) {
+        return `Filters the input collection so only matching elements are returned.`;
+    }
+    const reduceMatch = expr.match(/(\w+)\.reduce\(\([^,]+,\s*(\w+)\)\s*=>\s*[^+]+\+\s*([^,)]+)/);
+    if (reduceMatch) {
+        return `Sums ${reduceMatch[3].trim()} across ${reduceMatch[1]} to return the aggregate value.`;
+    }
+    if (/\.reduce\(|sum\(/.test(expr)) {
+        return `Aggregates the input values into a single result for downstream use.`;
+    }
+    if (/true|false|&&|\|\||[<>]=?|===?|!==?/.test(expr)) {
+        return `Evaluates \`${expr}\` and returns the boolean outcome for the caller's decision path.`;
+    }
+    if (params.length > 0 && params.some(param => expr.includes(param))) {
+        return `Derives \`${expr}\` from ${operands} and returns it for the next step.`;
+    }
+    return null;
+}
+
 function buildRuleBasedComment(target: CommentTarget): string {
     const name = extractIdentifier(target.snippet, target.kind);
     const stringCode = target.snippet.toLowerCase();
@@ -240,12 +292,16 @@ function buildRuleBasedComment(target: CommentTarget): string {
     if (target.kind === 'function') {
         const isComponent = name && /^[A-Z]/.test(name) && stringCode.includes('return');
         const isHook = name && name.startsWith('use');
+        const returnDescription = describeReturnExpression(target.snippet, params);
 
         if (isComponent) {
             return `Builds and returns the visual elements that display ${domain} to the user.`;
         }
         if (isHook) {
             return `Manages reusable state and derived behavior for this feature.`;
+        }
+        if (returnDescription) {
+            return returnDescription;
         }
         if (name) {
             const lowerName = name.toLowerCase();
@@ -287,9 +343,11 @@ function buildRuleBasedComment(target: CommentTarget): string {
             }
         }
         if (params.length > 0) {
-            return `Takes ${params.slice(0, 3).join(', ')} and produces the result needed by the calling code.`;
+            const words = name ? splitIdentifierWords(name).filter(word => !['get', 'set', 'make', 'build', 'run'].includes(word)) : [];
+            const purpose = words.length > 0 ? ` for ${words.slice(0, 3).join(' ')}` : '';
+            return `Uses ${params.slice(0, 3).join(', ')}${purpose} and returns the value expected by the caller.`;
         }
-        return `Performs the core operation and returns the result to the caller.`;
+        return `Runs the module's core operation and returns the value expected by the caller.`;
     }
 
     return `Processes ${firstLine || domain} for this operation.`;

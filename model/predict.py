@@ -475,6 +475,48 @@ def _extract_params(code: str) -> list[str]:
     return params
 
 
+def _split_identifier_words(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    return [
+        part.lower()
+        for part in re.split(r"[_\s]+", spaced)
+        if len(part) > 1
+    ]
+
+
+def _describe_return_expression(code: str, params: list[str]) -> str | None:
+    match = re.search(r"\breturn\s+([^;\n]+)", code)
+    if not match:
+        return None
+
+    expr = match.group(1).strip()
+    operands = ", ".join(params[:3])
+    list_filter = re.match(r"^\[(\w+)\s+for\s+(\w+)\s+in\s+(\w+)\s+if\s+(.+)\]$", expr)
+    if list_filter:
+        return f"Filters {list_filter.group(3)} to keep only entries where {list_filter.group(4).strip()} is true."
+    any_all = re.match(r"^any\(all\((.+?)\)\s+for\s+(\w+)\s+in\s+(\w+)\)$", expr)
+    if any_all:
+        return f"Scans each {any_all.group(2)} in {any_all.group(3)} and returns whether every item satisfies {any_all.group(1).strip()}."
+    if len(params) >= 2 and re.search(rf"\b{re.escape(params[0])}\b\s*\+\s*\b{re.escape(params[1])}\b", expr):
+        return f"Adds {params[0]} and {params[1]} to return their combined value to the caller."
+    if len(params) >= 2 and re.search(r"[-*/%]", expr) and all(p in expr for p in params[:2]):
+        return f"Combines {operands} with the arithmetic expression `{expr}` to return the computed value."
+    if ".map(" in expr or "map(" in expr:
+        return "Maps the input collection into a transformed result needed by the caller."
+    if ".filter(" in expr or "filter(" in expr:
+        return "Filters the input collection so only matching elements are returned."
+    reduce_match = re.search(r"(\w+)\.reduce\(\([^,]+,\s*(\w+)\)\s*=>\s*[^+]+\+\s*([^,)]+)", expr)
+    if reduce_match:
+        return f"Sums {reduce_match.group(3).strip()} across {reduce_match.group(1)} to return the aggregate value."
+    if ".reduce(" in expr or "sum(" in expr:
+        return "Aggregates the input values into a single result for downstream use."
+    if re.search(r"\b(true|false)\b|&&|\|\||[<>]=?|===?|!==?", expr):
+        return f"Evaluates `{expr}` and returns the boolean outcome for the caller's decision path."
+    if params and any(p in expr for p in params):
+        return f"Derives `{expr}` from {operands} and returns it for the next step."
+    return None
+
+
 def _extract_intents(code: str) -> list[str]:
     lower = code.lower()
     intents: list[str] = []
@@ -637,6 +679,7 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
     function_name = _extract_function_name(code) or "System"
     lower_name = function_name.lower()
     params = _extract_params(code)
+    return_description = _describe_return_expression(code, params)
 
     if "merge_sort" in lower_name or ("sort" in lower_name and "mid" in code_lower and "len(" in code_lower):
         return (
@@ -680,6 +723,9 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
             "intent:ui_rendering",
         )
 
+    if return_description:
+        return (return_description, "intent:return_expression")
+
     # ── Name-based intent detection with how+why phrasing ────────────────
     intents = _extract_intents(code)
     param_list = ", ".join(params[:3]) if params else ""
@@ -710,8 +756,13 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
 
     # ── Generic fallback with parameter awareness ────────────────────────
     if params:
-        return (f"Takes {param_list} and produces the result needed by the calling code.", "intent:concise_summary")
-    return (f"Performs the core operation and returns the result to the caller.", "intent:concise_summary")
+        words = [
+            word for word in _split_identifier_words(function_name)
+            if word not in {"get", "set", "make", "build", "run"}
+        ]
+        purpose = f" for {' '.join(words[:3])}" if words else ""
+        return (f"Uses {param_list}{purpose} and returns the value expected by the caller.", "intent:concise_summary")
+    return (f"Runs the module's core operation and returns the value expected by the caller.", "intent:concise_summary")
 
 
 def _is_low_quality_comment(comment: str, code: str = "", code_type: str = "function") -> tuple[bool, str | None]:

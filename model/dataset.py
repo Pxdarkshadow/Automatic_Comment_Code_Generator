@@ -22,7 +22,10 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Iterator
 
-from datasets import load_dataset
+try:
+    from datasets import load_dataset
+except ImportError:
+    load_dataset = None
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -471,6 +474,8 @@ def _collect_pairs(lang: str, max_samples: int) -> list[tuple[str, str]]:
     Returns curated (code, comment) tuples.
     """
     print(f"  ↓ Loading {lang} split from Hugging Face (code_search_net) …")
+    if load_dataset is None:
+        raise RuntimeError("The 'datasets' package is required for training data collection.")
     ds = load_dataset("code_search_net", lang, split="train")
 
     pairs: list[tuple[str, str]] = []
@@ -536,6 +541,8 @@ def _curate_record(
 
 def _collect_codesearchnet_pairs(lang: str, max_samples: int) -> list[SampleRecord]:
     print(f"  Loading {lang} split from Hugging Face (code_search_net)...")
+    if load_dataset is None:
+        raise RuntimeError("The 'datasets' package is required for training data collection.")
     ds = load_dataset("code_search_net", lang, split="train")
 
     samples: list[SampleRecord] = []
@@ -561,6 +568,8 @@ def _collect_codesearchnet_pairs(lang: str, max_samples: int) -> list[SampleReco
 
 def _collect_codexglue_pairs(lang: str, max_samples: int) -> list[SampleRecord]:
     print(f"  Loading {lang} split from Hugging Face (google/code_x_glue_ct_code_to_text)...")
+    if load_dataset is None:
+        raise RuntimeError("The 'datasets' package is required for training data collection.")
     ds = load_dataset("google/code_x_glue_ct_code_to_text", lang, split="train")
 
     samples: list[SampleRecord] = []

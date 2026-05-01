@@ -3,8 +3,9 @@
  * Packages the payload for secure transport across boundaries and asynchronously gathers the resulting insights,
  * translating raw predictions into structural summaries.
  */
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as path from 'path';
+import * as vscode from 'vscode';
 
 export interface GenerationResult {
     comment: string;
@@ -33,12 +34,40 @@ export async function generateComment(code: string, progressCallback: (msg: stri
         const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
         const maxLen = codeType === 'file_overview' ? 96 : 48;
         const minLen = codeType === 'file_overview' ? 20 : 8;
-        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len ${minLen} --max-len ${maxLen} --length-alpha 0.7 --repetition-penalty 1.3 --code-type ${codeType}`;
+        const config = vscode.workspace.getConfiguration('autoComment');
+        const pythonPath = (config.get<string>('pythonPath', 'python') || 'python').trim();
+        const timeoutMs = Math.max(config.get<number>('inferenceTimeoutMs', 45000) || 45000, 5000);
+        const args = [
+            scriptPath,
+            '--b64', codeB64,
+            '--json',
+            '--mode', 'beam',
+            '--beam-width', '6',
+            '--temperature', '0.65',
+            '--min-len', String(minLen),
+            '--max-len', String(maxLen),
+            '--length-alpha', '0.7',
+            '--repetition-penalty', '1.3',
+            '--code-type', codeType,
+        ];
         
-        exec(command, { cwd: path.join(__dirname, '..', 'model') }, (error, stdout, stderr) => {
+        execFile(pythonPath, args, {
+            cwd: path.join(__dirname, '..', 'model'),
+            timeout: timeoutMs,
+            maxBuffer: 2 * 1024 * 1024,
+            windowsHide: true,
+        }, (error, stdout, stderr) => {
             if (error) {
-                console.error(`Error during inference: ${error.message}`);
-                reject(error);
+                const detail = stderr?.trim() || error.message;
+                if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+                    reject(new Error(`Local model inference timed out after ${timeoutMs}ms. Increase autoComment.inferenceTimeoutMs or select a shorter snippet.`));
+                    return;
+                }
+                if (/ModuleNotFoundError|No module named/i.test(detail)) {
+                    reject(new Error(`Python dependency missing while running the local model: ${detail}`));
+                    return;
+                }
+                reject(new Error(`Local model inference failed: ${detail}`));
                 return;
             }
             if (stderr) {
