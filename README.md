@@ -213,6 +213,11 @@ The fallback path is also used when the local model emits empty, repetitive, or 
 
 ## License
 
-No explicit license file is currently present in the repository. Add a `LICENSE` file if you plan to distribute publicly.
+No explicit license file is currently present in the repository. 
+
+## Contact
+
+- Developer: [Shaun Mathew](https://github.com/Pxdarkshadow)
+- Email: [EMAIL_ADDRESS]
 
 
