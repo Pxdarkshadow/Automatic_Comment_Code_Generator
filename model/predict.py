@@ -58,23 +58,26 @@ class DecodeConfig:
 # ── System Instruction ───────────────────────────────────────────────────────
 
 SYSTEM_INSTRUCTION = (
-    "Generate one concise code comment that blends HOW the code works with WHY it was written.\n"
-    "Start by describing the mechanism briefly, then explain the purpose or reason.\n"
-    "The code element may be a function, loop, logic block, or variable assignment.\n"
-    "For functions: describe what the function does and why that operation matters.\n"
-    "For loops: describe what is iterated and why the iteration is needed.\n"
-    "For logic blocks: describe what is checked and what it protects against.\n"
-    "For variables: describe what value is stored and why it is needed later.\n"
-    "Good: 'Iterates through each row and prints cells separated by pipes to render a readable grid.'\n"
-    "Good: 'Checks all rows, columns, and diagonals for matching marks to determine the winner.'\n"
-    "Bad:  'Iterates over the list and checks each element.'\n"
-    "Bad:  'Processes the input and returns the result for this operation.'\n"
-    "Output requirements:\n"
-    "1. Produce exactly one sentence.\n"
-    "2. Be specific to the actual code — mention real variable/function names when useful.\n"
-    "3. Avoid generic phrases like 'processes the input', 'for this operation'.\n"
-    "4. Do not use filler phrases such as 'this code', 'here is', or 'the function'.\n"
-    "5. Avoid architectural jargon like orchestration boundary, subsystem transition.\n"
+    "Generate high-context code documentation that bridges implementation logic with business intent.\n"
+    "CRITICAL: Do not describe WHAT the code is (e.g., 'a loop'); describe WHAT IT ACHIEVES in the context of the data.\n"
+    "\n"
+    "Core Directives:\n"
+    "1. Implementation + Intent: Every comment must pair a concrete action with a functional goal.\n"
+    "2. Concrete Naming: Use the actual variable names, constants, or data types present in the code.\n"
+    "3. Zero-Tolerance for Generic Verbs: Forbidden words include: 'process', 'handle', 'manage', 'perform', 'calculate', and 'check'. Use specific verbs like 'sanitizes', 'aggregates', 'validates', or 'maps'.\n"
+    "4. Structural Requirements:\n"
+    "   - Logic/Functions: Exactly one sentence. Start with a present-tense verb.\n"
+    "   - [FILE_OVERVIEW]: Exactly three sentences. Sentence 1: Primary responsibility. Sentence 2: Internal architecture/flow. Sentence 3: External dependencies or project role.\n"
+    "\n"
+    "Refinement Examples:\n"
+    "- Bad: 'Iterates through the list and updates the status.' (Too generic)\n"
+    "- Good: 'Traverses the `UserRegistry` to flag accounts that haven't authenticated within the `INACTIVITY_THRESHOLD` to trigger cleanup.'\n"
+    "- Bad: 'This function returns the calculated total.' (Filler phrases + generic)\n"
+    "- Good: 'Sums all `line_item` values minus applicable `tax_exemptions` to provide a final checkout price.'\n"
+    "\n"
+    "Constraints:\n"
+    "- No filler: Do not use 'This code...', 'The purpose of...', or 'Function to...'.\n"
+    "- No jargon: Avoid 'orchestration', 'abstraction layer', or 'wrapper' unless they are part of the literal class name."
 )
 
 
@@ -498,6 +501,70 @@ def _build_descriptive_fallback(code: str, code_type: str = "function") -> tuple
     """Generate a deterministic how+why comment describing what the code does and why."""
     code_lower = code.lower()
 
+    # ── File overview fallback ────────────────────────────────────────────
+    if code_type == "file_overview":
+        # Strip [FILE_OVERVIEW] tag if present
+        clean_code = re.sub(r"^\[FILE_OVERVIEW\]\s*", "", code, flags=re.MULTILINE)
+        lines = clean_code.split("\n")
+
+        classes = [m.group(1) or m.group(2) for line in lines
+                   for m in [re.search(r"(?:class\s+)([A-Za-z_]\w*)|(?:class\s+)([A-Za-z_]\w*)", line)] if m]
+        functions = []
+        for line in lines:
+            fm = re.search(r"def\s+([A-Za-z_]\w*)\s*\(", line)
+            if fm:
+                functions.append(fm.group(1))
+                continue
+            fm2 = re.search(r"function\s+([A-Za-z_]\w*)\s*\(", line)
+            if fm2:
+                functions.append(fm2.group(1))
+                continue
+            fm3 = re.search(r"(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s+)?(?:\(|[A-Za-z_]).*=>", line)
+            if fm3:
+                functions.append(fm3.group(1))
+
+        imports = []
+        for line in lines:
+            im = re.search(r"import\s+.*from\s+['\"]([^'\"]+)['\"]", line)
+            if im:
+                imports.append(im.group(1))
+            im2 = re.search(r"(?:from\s+(\S+)\s+import|^import\s+(\S+))", line)
+            if im2:
+                imports.append((im2.group(1) or im2.group(2)).strip())
+
+        has_async = any(k in clean_code for k in ["async ", "await ", "Promise"])
+        has_error = any(k in clean_code.lower() for k in ["try", "catch", "except", "raise", "throw"])
+
+        # Purpose
+        if classes and functions:
+            purpose = f"This file defines {', '.join(classes[:3])} and implements {len(functions)} supporting functions that form a cohesive module."
+        elif classes:
+            purpose = f"This file defines the {', '.join(classes[:3])} class{'es' if len(classes) > 1 else ''} encapsulating the core behavior for this module."
+        elif functions:
+            purpose = f"This file implements {len(functions)} functions including {', '.join(functions[:4])} that handle the primary logic."
+        else:
+            purpose = "This file contains configuration and declarations that set up the operational context for the project."
+
+        # Structure
+        struct_parts = []
+        if imports:
+            struct_parts.append(f"depends on {', '.join(imports[:4])}")
+        if has_async:
+            struct_parts.append("employs asynchronous operations")
+        if has_error:
+            struct_parts.append("includes error handling paths")
+        structure = f"It {', '.join(struct_parts[:3])}." if struct_parts else "It is structured as a straightforward procedural module."
+
+        # Role
+        if any(re.search(r"\bexport\b", line) for line in lines):
+            role = "Exports its public API for consumption by other parts of the system."
+        elif any(n.lower() in ("main", "run", "start", "activate") for n in functions):
+            role = "Serves as an entry point that orchestrates the program flow."
+        else:
+            role = "Acts as a utility module that other parts of the codebase invoke for shared functionality."
+
+        return (f"{purpose} {structure} {role}", "intent:file_overview")
+
     # ── Loop fallback ────────────────────────────────────────────────────
     if code_type == "loop":
         if any(k in code_lower for k in ["sum(", "+=", "total", "count", "accumulate"]):
@@ -810,7 +877,11 @@ def predict_with_meta(
     prefix_len = len(prompt_ids)
 
     # Cap prompt length to leave room for generation
-    max_prompt = 512 - cfg.max_len
+    max_gen = cfg.max_len
+    # Allow longer output for file overviews to accommodate 3 sentences
+    if code_type == "file_overview":
+        max_gen = max(cfg.max_len, 96)
+    max_prompt = 512 - max_gen
     truncated = len(prompt_ids) > max_prompt
     if truncated:
         prompt_ids = prompt_ids[:max_prompt]
@@ -925,7 +996,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
     parser.add_argument("--no-cache", dest="use_cache", action="store_false", default=True)
     parser.add_argument("--code-type", dest="code_type", default="function",
-                        choices=["function", "loop", "complex_logic", "variable"],
+                        choices=["function", "loop", "complex_logic", "variable", "file_overview"],
                         help="Type of code element being commented")
 
     return parser.parse_args()

@@ -295,18 +295,36 @@ function buildRuleBasedComment(target: CommentTarget): string {
     return `Processes ${firstLine || domain} for this operation.`;
 }
 
-function buildFileOverview(text: string): string {
+function buildFileOverview(text: string): string[] {
     const lines = text.split(/\r?\n/);
     const classNames: string[] = [];
     const functionNames: string[] = [];
+    const importModules: string[] = [];
+    const exportNames: string[] = [];
     let controlFlowCount = 0;
+    let hasAsync = false;
+    let hasErrorHandling = false;
+    let hasDataStructures = false;
+    let hasIOOperations = false;
 
     for (const line of lines) {
+        // Detect imports
+        const jsImport = line.match(/^\s*import\s+.*from\s+['"]([^'"]+)['"]/);
+        const pyImport = line.match(/^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))/);
+        if (jsImport) { importModules.push(jsImport[1]); }
+        if (pyImport) { importModules.push((pyImport[1] || pyImport[2]).trim()); }
+
+        // Detect exports
+        const exportMatch = line.match(/^\s*export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+        if (exportMatch) { exportNames.push(exportMatch[1]); }
+
+        // Detect classes
         const classMatch = line.match(/^\s*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)|^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)/);
         if (classMatch) {
             classNames.push((classMatch[1] || classMatch[2]).trim());
         }
 
+        // Detect functions
         const fnMatch = line.match(/^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(|^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(|^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{/);
         const arrowFnMatch = line.match(/^\s*(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>/);
         if (fnMatch) {
@@ -315,19 +333,69 @@ function buildFileOverview(text: string): string {
             functionNames.push(arrowFnMatch[1].trim());
         }
 
+        // Detect patterns
         if (/^\s*(for|while|if|else\s+if|elif|else)\b/.test(line)) {
             controlFlowCount += 1;
         }
+        if (/\basync\b|\bawait\b|\bPromise\b/.test(line)) { hasAsync = true; }
+        if (/\btry\b|\bcatch\b|\bexcept\b|\braise\b|\bthrow\b/.test(line)) { hasErrorHandling = true; }
+        if (/\bMap\b|\bSet\b|\bdict\b|\blist\b|\bArray\b|\bqueue\b|\bstack\b/i.test(line)) { hasDataStructures = true; }
+        if (/\bopen\(|\bread\(|\bwrite\(|\bfetch\(|\brequest\b|\bresponse\b|\bfs\./i.test(line)) { hasIOOperations = true; }
     }
 
-    const classSummary = classNames.length > 0
-        ? `Classes: ${classNames.slice(0, 4).join(', ')}${classNames.length > 4 ? ', ...' : ''}.`
-        : 'No class definitions detected.';
-    const fnSummary = functionNames.length > 0
-        ? `Main functions/methods: ${functionNames.slice(0, 6).join(', ')}${functionNames.length > 6 ? ', ...' : ''}.`
-        : 'No function definitions detected.';
+    // Line 1: Purpose — what this file is responsible for
+    let purpose: string;
+    if (classNames.length > 0 && functionNames.length > 0) {
+        purpose = `This file defines ${classNames.slice(0, 3).join(', ')} and provides ${functionNames.length} supporting functions that together form a cohesive module.`;
+    } else if (classNames.length > 0) {
+        purpose = `This file defines the ${classNames.slice(0, 3).join(', ')} class${classNames.length > 1 ? 'es' : ''} which encapsulate${classNames.length === 1 ? 's' : ''} the core behavior for this module.`;
+    } else if (functionNames.length > 0) {
+        const keyFns = functionNames.slice(0, 4).join(', ');
+        purpose = `This file implements ${functionNames.length} functions including ${keyFns} that handle the primary logic for this module.`;
+    } else {
+        purpose = `This file contains configuration and declarations that set up the operational context for the project.`;
+    }
 
-    return `File summary: ${classSummary} ${fnSummary} Control-flow blocks detected: ${controlFlowCount}.`;
+    // Line 2: Structure — how it is organized
+    const parts: string[] = [];
+    if (importModules.length > 0) {
+        parts.push(`depends on ${importModules.slice(0, 4).join(', ')}${importModules.length > 4 ? ' and others' : ''}`);
+    }
+    if (controlFlowCount > 0) {
+        parts.push(`uses ${controlFlowCount} control-flow blocks for decision logic`);
+    }
+    if (hasAsync) { parts.push('employs asynchronous operations'); }
+    if (hasErrorHandling) { parts.push('includes error handling paths'); }
+    if (hasDataStructures) { parts.push('manages structured data collections'); }
+    if (hasIOOperations) { parts.push('performs I/O or network operations'); }
+    const structure = parts.length > 0
+        ? `It ${parts.slice(0, 3).join(', ')}.`
+        : `It is structured as a straightforward procedural module with minimal dependencies.`;
+
+    // Line 3: Role — why it exists in the project
+    let role: string;
+    if (exportNames.length > 0) {
+        role = `Exports ${exportNames.slice(0, 4).join(', ')}${exportNames.length > 4 ? ' and more' : ''} for consumption by other parts of the system.`;
+    } else if (functionNames.some(n => /^(main|run|start|activate|execute|play)$/i.test(n))) {
+        role = `Serves as an entry point that orchestrates the program flow by delegating to the internal functions.`;
+    } else if (classNames.length > 0) {
+        role = `Provides reusable abstractions that other modules instantiate or extend to implement their features.`;
+    } else {
+        role = `Acts as a utility module that other parts of the codebase invoke for shared functionality.`;
+    }
+
+    return [purpose, structure, role];
+}
+
+function formatFileOverview(overviewLines: string[], languageId: string, indent: string): string {
+    const prefix = getCommentPrefix(languageId);
+    if (['html', 'xml'].includes(languageId)) {
+        return overviewLines.map(line => `${indent}<!-- ${line} -->`).join('\n') + '\n';
+    }
+    if (['python', 'ruby'].includes(languageId)) {
+        return overviewLines.map(line => `${indent}${prefix} ${line}`).join('\n') + '\n';
+    }
+    return overviewLines.map(line => `${indent}${prefix} ${line}`).join('\n') + '\n';
 }
 
 function getBlockEnd(lines: string[], startIndex: number, languageId: string): number {
@@ -609,6 +677,45 @@ export function activate(context: vscode.ExtensionContext) {
                     ? (lines[firstNonEmptyInSelection].match(/^\s*/) || [''])[0]
                     : '';
 
+                // ── Generate 3-line file overview when operating on the full file ──
+                let fileOverviewText = '';
+                const isFullFile = selection.isEmpty;
+                if (isFullFile) {
+                    progress.report({ message: 'Generating file overview...' });
+
+                    // Check if the file already has a comment block at the top
+                    const firstLine = document.lineAt(0).text.trim();
+                    const hasExistingHeader = firstLine.startsWith('//') || firstLine.startsWith('#') ||
+                        firstLine.startsWith('/*') || firstLine.startsWith('<!--') ||
+                        firstLine.startsWith('"""') || firstLine.startsWith("'''");
+
+                    if (!hasExistingHeader) {
+                        // Try LLM-based overview first
+                        let llmOverviewLines: string[] | null = null;
+                        try {
+                            const overviewPrompt = `[FILE_OVERVIEW]\n${compactSnippet(text)}`;
+                            const overviewResult = await generateComment(overviewPrompt, () => undefined, 'file_overview');
+                            if (!overviewResult.usedFallback && !looksJargonLike(overviewResult.comment)) {
+                                // Split LLM output into 3 lines if it returned multi-sentence
+                                const sentences = overviewResult.comment
+                                    .replace(/\. /g, '.\n')
+                                    .split('\n')
+                                    .map((s: string) => s.trim())
+                                    .filter((s: string) => s.length > 10);
+                                if (sentences.length >= 3) {
+                                    llmOverviewLines = sentences.slice(0, 3);
+                                }
+                            }
+                        } catch {
+                            // LLM overview failed — fall through to deterministic
+                        }
+
+                        // Use deterministic fallback if LLM didn't produce 3 good lines
+                        const overviewLines = llmOverviewLines || buildFileOverview(text);
+                        fileOverviewText = formatFileOverview(overviewLines, codeLang, summaryIndent);
+                    }
+                }
+
                 if (targets.length === 0) {
                     const result = await generateComment(compactSnippet(text), (msg) => {
                         progress.report({ message: msg });
@@ -618,6 +725,10 @@ export function activate(context: vscode.ExtensionContext) {
                     const fallbackComment = formatInlineComment(result.comment, codeLang, fallbackIndent);
 
                     await editor.edit(editBuilder => {
+                        // Insert file overview at the very top if available
+                        if (fileOverviewText) {
+                            editBuilder.insert(new vscode.Position(0, 0), fileOverviewText + '\n');
+                        }
                         editBuilder.insert(fallbackInsert, fallbackComment);
                     });
 
@@ -625,7 +736,7 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                progress.report({ message: `Generating ${targets.length} descriptive comments...` });
+                progress.report({ message: `Generating ${targets.length} detailed one-line comments...` });
                 const inserts: { line: number; text: string }[] = [];
 
                 let ruleFallbackCount = 0;
@@ -638,7 +749,7 @@ export function activate(context: vscode.ExtensionContext) {
                     let selectedComment: string;
 
                     if (!model.usedFallback && !model.truncated && !looksJargonLike(model.comment)) {
-                        // Primary model produced an acceptable comment
+                        // Primary model produced an acceptable detailed one-line comment
                         selectedComment = normalizeSpace(model.comment);
                     } else {
                         // Deterministic rule-based fallback
@@ -652,12 +763,19 @@ export function activate(context: vscode.ExtensionContext) {
 
                 inserts.sort((a, b) => b.line - a.line);
                 await editor.edit(editBuilder => {
+                    // Insert file overview at the very top before block comments
+                    if (fileOverviewText) {
+                        editBuilder.insert(new vscode.Position(0, 0), fileOverviewText + '\n');
+                    }
                     for (const insert of inserts) {
                         editBuilder.insert(new vscode.Position(insert.line, 0), insert.text);
                     }
                 });
 
                 const parts = [`Generated ${inserts.length} comments`];
+                if (fileOverviewText) {
+                    parts.push('+ 3-line file overview');
+                }
                 if (ruleFallbackCount > 0) {
                     parts.push(`(${ruleFallbackCount} via rules)`);
                 }

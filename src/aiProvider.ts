@@ -31,7 +31,9 @@ export async function generateComment(code: string, progressCallback: (msg: stri
     return new Promise((resolve, reject) => {
         const scriptPath = path.join(__dirname, '..', 'model', 'predict.py');
         const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
-        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len 8 --max-len 48 --length-alpha 0.7 --repetition-penalty 1.3 --code-type ${codeType}`;
+        const maxLen = codeType === 'file_overview' ? 96 : 48;
+        const minLen = codeType === 'file_overview' ? 20 : 8;
+        const command = `python "${scriptPath}" --b64 "${codeB64}" --json --mode beam --beam-width 6 --temperature 0.65 --min-len ${minLen} --max-len ${maxLen} --length-alpha 0.7 --repetition-penalty 1.3 --code-type ${codeType}`;
         
         exec(command, { cwd: path.join(__dirname, '..', 'model') }, (error, stdout, stderr) => {
             if (error) {
