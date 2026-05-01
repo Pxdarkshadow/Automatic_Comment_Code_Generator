@@ -687,21 +687,3 @@ def _normalizer_available() -> bool:
     return False
 
 
-# ── Self-test ────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    cfg = TransformerConfig(vocab_size=512, max_seq_len=128, n_layers=2, d_model=64, n_heads=4, d_ff=256)
-    model = TransformerDecoder(cfg)
-    print(f"Config        : {cfg}")
-    print(f"Parameters    : {model.num_params:,}")
-
-    dummy = torch.randint(0, 512, (2, 32))
-    logits, _ = model(dummy)
-    assert logits.shape == (2, 32, 512), f"Unexpected shape {logits.shape}"
-    print(f"Forward shape : {logits.shape}  ✓")
-
-    logits_c, past = model(dummy[:, :16], use_cache=True)
-    logits_c2, _ = model(dummy[:, 16:], past_key_values=past, use_cache=False)
-    print(f"KV-cache step : {logits_c.shape} → {logits_c2.shape}  ✓")
-
-    print("\nAll self-tests passed.")
