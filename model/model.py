@@ -415,10 +415,34 @@ def _load_refinement_config() -> _RefinementConfig:
 
 # ── Stage-2 Backends ─────────────────────────────────────────────────────────
 
+def _is_localhost_url(url: str) -> bool:
+    """Security Fix #3: Verify that the endpoint URL points to localhost only.
+
+    Prevents SSRF attacks and source code exfiltration by rejecting any
+    endpoint that does not resolve to 127.0.0.1 or ::1.  A malicious
+    workspace-level decoder_config.json could otherwise redirect code
+    to an attacker-controlled server.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().strip()
+        # Only allow explicit localhost addresses
+        _SAFE_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}
+        return host in _SAFE_HOSTS
+    except Exception:
+        return False
+
+
 def _refine_via_endpoint(
     source_tokens: str, seed_text: str, cfg: _RefinementConfig
 ) -> _Optional[str]:
     """Stage-2 refinement through the HTTP inference relay."""
+    # Security Fix #3: Block requests to non-localhost endpoints to
+    # prevent source code exfiltration and SSRF attacks.
+    if not _is_localhost_url(cfg.rewrite_endpoint):
+        return None
+
     try:
         import urllib.request
         import urllib.error
@@ -462,11 +486,40 @@ def _refine_via_endpoint(
 _NATIVE_ENGINE_CACHE: dict[str, object] = {}
 
 
+def _validate_native_weights_path(weights_path: str) -> bool:
+    """Security Fix #6: Validate that the GGUF weights file is safe to load.
+
+    Ensures the file:
+    - Has a .gguf extension (expected format for llama.cpp)
+    - Lives within the model directory (prevents path traversal)
+    - Is not a symlink pointing outside the model directory
+    """
+    if not weights_path:
+        return False
+
+    # Must have .gguf extension
+    if not weights_path.lower().endswith(".gguf"):
+        return False
+
+    # Resolve symlinks and verify the real path is within the model directory
+    _model_dir = _os.path.dirname(_os.path.abspath(__file__))
+    real_path = _os.path.realpath(weights_path)
+    real_model_dir = _os.path.realpath(_model_dir)
+    if not real_path.startswith(real_model_dir + _os.sep) and real_path != real_model_dir:
+        return False
+
+    return True
+
+
 def _refine_via_native(
     source_tokens: str, seed_text: str, cfg: _RefinementConfig
 ) -> _Optional[str]:
     """Stage-2 refinement through compiled native inference bindings."""
     if not cfg.local_weights_path or not _os.path.isfile(cfg.local_weights_path):
+        return None
+
+    # Security Fix #6: Validate weights path before loading
+    if not _validate_native_weights_path(cfg.local_weights_path):
         return None
 
     try:
@@ -608,7 +661,11 @@ def _normalizer_available() -> bool:
         return False
 
     if cfg.stage in ("auto", "ollama", "endpoint"):
-        try:
+        # Security Fix #3: Only probe localhost endpoints
+        if not _is_localhost_url(cfg.rewrite_endpoint):
+            pass
+        else:
+          try:
             import urllib.request
             req = urllib.request.Request(
                 f"{cfg.rewrite_endpoint}/api/tags", method="GET"
@@ -616,11 +673,11 @@ def _normalizer_available() -> bool:
             with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status == 200:
                     return True
-        except Exception:
+          except Exception:
             pass
 
     if cfg.stage in ("auto", "llama_cpp", "native"):
-        if cfg.local_weights_path and _os.path.isfile(cfg.local_weights_path):
+        if cfg.local_weights_path and _os.path.isfile(cfg.local_weights_path) and _validate_native_weights_path(cfg.local_weights_path):
             try:
                 from llama_cpp import Llama  # type: ignore  # noqa: F401
                 return True

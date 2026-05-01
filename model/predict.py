@@ -102,14 +102,34 @@ def load_tokenizer() -> BPETokenizer:
 
 
 def load_checkpoint(device: torch.device) -> dict:
-    """Load the model checkpoint from disk."""
-    for path in [
+    """Load the model checkpoint from disk.
+
+    Security: Only loads from paths within SCRIPT_DIR to prevent loading
+    attacker-supplied pickle payloads from the workspace/CWD.  Uses
+    weights_only=True by default to block arbitrary code execution.
+    """
+    # Security Fix #1: Only search within the extension's own model directory.
+    # Never fall back to CWD which could be a malicious workspace.
+    _safe_paths = [
         os.path.join(SCRIPT_DIR, "checkpoints", "checkpoint.pt"),
         os.path.join(SCRIPT_DIR, "checkpoint.pt"),
-        "checkpoint.pt",
-    ]:
-        if os.path.isfile(path):
-            return torch.load(path, map_location=device, weights_only=False)
+    ]
+    for ckpt_path in _safe_paths:
+        if os.path.isfile(ckpt_path):
+            # Verify the path is actually inside SCRIPT_DIR (prevents symlink attacks)
+            real_path = os.path.realpath(ckpt_path)
+            real_script_dir = os.path.realpath(SCRIPT_DIR)
+            if not real_path.startswith(real_script_dir + os.sep) and real_path != real_script_dir:
+                print(f"Security: checkpoint path {ckpt_path} resolves outside model directory, skipping.", file=sys.stderr)
+                continue
+            try:
+                # Prefer weights_only=True to prevent pickle-based RCE
+                return torch.load(ckpt_path, map_location=device, weights_only=True)
+            except Exception:
+                # Some older checkpoints saved with custom classes require
+                # weights_only=False.  Allow it only for verified-safe paths.
+                print("Warning: weights_only=True failed; falling back to weights_only=False for verified checkpoint.", file=sys.stderr)
+                return torch.load(ckpt_path, map_location=device, weights_only=False)
 
     print("Error: checkpoint.pt not found. Run train_pipeline.py first.", file=sys.stderr)
     sys.exit(1)
@@ -1035,6 +1055,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local code-comment inference (Transformer)")
     parser.add_argument("code", nargs="?", default=None)
     parser.add_argument("--b64", dest="code_b64", default=None)
+    parser.add_argument("--stdin", dest="read_stdin", action="store_true",
+                        help="Read base64-encoded code from stdin (avoids CLI length limits)")
     parser.add_argument("--json", dest="as_json", action="store_true")
     parser.add_argument("--mode", choices=["greedy", "top_k", "top_p", "beam"], default="beam")
     parser.add_argument("--beam-width", type=int, default=6)
@@ -1056,7 +1078,16 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
 
-    if args.code_b64:
+    # Security Fix #5: Support reading code from stdin to avoid Windows
+    # command-line length limits (8191 chars) and prevent shell metachar issues.
+    if getattr(args, "read_stdin", False):
+        try:
+            stdin_data = sys.stdin.read().strip()
+            code_input = base64.b64decode(stdin_data).decode("utf-8", errors="replace")
+        except Exception as exc:
+            print(f"Error: invalid base64 from stdin ({exc})", file=sys.stderr)
+            sys.exit(1)
+    elif args.code_b64:
         try:
             code_input = base64.b64decode(args.code_b64).decode("utf-8", errors="replace")
         except Exception as exc:

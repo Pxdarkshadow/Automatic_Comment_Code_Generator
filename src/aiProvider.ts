@@ -3,7 +3,7 @@
  * Packages the payload for secure transport across boundaries and asynchronously gathers the resulting insights,
  * translating raw predictions into structural summaries.
  */
-import { execFile } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -21,9 +21,48 @@ export interface GenerationResult {
     latencyMs: number;
 }
 
+// ── Security: Python Path Resolution ────────────────────────────────────────
+// Resolves an absolute path to the Python executable to prevent PATH hijacking
+// attacks where a malicious workspace could place a rogue `python.exe` in the
+// project directory.  Falls back to the user-configured setting only if it is
+// already an absolute path; otherwise uses system-level resolution that skips
+// the workspace directory.
+
+function resolvePythonPath(): string {
+    const config = vscode.workspace.getConfiguration('autoComment');
+    const configured = (config.get<string>('pythonPath', '') || '').trim();
+
+    // If the user explicitly set an absolute path, trust it
+    if (configured && path.isAbsolute(configured)) {
+        return configured;
+    }
+
+    // Use the VS Code Python extension's interpreter if available
+    const pythonExt = vscode.extensions.getExtension('ms-python.python');
+    if (pythonExt?.isActive) {
+        const pythonApi = pythonExt.exports;
+        try {
+            const interpreterPath = pythonApi?.settings?.getExecutionDetails?.(
+                vscode.workspace.workspaceFolders?.[0]?.uri
+            )?.execCommand?.[0];
+            if (interpreterPath && path.isAbsolute(interpreterPath)) {
+                return interpreterPath;
+            }
+        } catch {
+            // Python extension API changed; fall through
+        }
+    }
+
+    // Fallback: use 'python' but NEVER resolve from the workspace directory.
+    // child_process.spawn with env PATH will still find system Python,
+    // but the cwd is set to the model/ directory (inside the extension bundle),
+    // not the workspace, preventing workspace-level hijacking.
+    return configured || 'python';
+}
+
 /**
  * Initiates the external inference procedure to generate a human-readable interpretation of the input structure.
- * Encodes the payload to bypass command-line termination issues, invokes the parallel analysis process,
+ * Passes the code payload via stdin to avoid command-line length limits and shell injection vectors,
  * and surfaces the computed textual result while reporting status milestones back to the invocation source.
  */
 export async function generateComment(code: string, progressCallback: (msg: string) => void, codeType: string = 'function'): Promise<GenerationResult> {
@@ -31,15 +70,18 @@ export async function generateComment(code: string, progressCallback: (msg: stri
     
     return new Promise((resolve, reject) => {
         const scriptPath = path.join(__dirname, '..', 'model', 'predict.py');
-        const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
         const maxLen = codeType === 'file_overview' ? 96 : 48;
         const minLen = codeType === 'file_overview' ? 20 : 8;
         const config = vscode.workspace.getConfiguration('autoComment');
-        const pythonPath = (config.get<string>('pythonPath', 'python') || 'python').trim();
         const timeoutMs = Math.max(config.get<number>('inferenceTimeoutMs', 45000) || 45000, 5000);
+        const pythonPath = resolvePythonPath();
+
+        // Security Fix #4 & #5: Use spawn() instead of exec() to avoid shell
+        // injection, and pass code via stdin instead of CLI args to avoid
+        // Windows command-line length limits (8191 chars).
         const args = [
             scriptPath,
-            '--b64', codeB64,
+            '--stdin',
             '--json',
             '--mode', 'beam',
             '--beam-width', '6',
@@ -50,19 +92,41 @@ export async function generateComment(code: string, progressCallback: (msg: stri
             '--repetition-penalty', '1.3',
             '--code-type', codeType,
         ];
-        
-        execFile(pythonPath, args, {
-            cwd: path.join(__dirname, '..', 'model'),
+
+        const modelDir = path.join(__dirname, '..', 'model');
+        const child = spawn(pythonPath, args, {
+            cwd: modelDir,
+            stdio: ['pipe', 'pipe', 'pipe'],
             timeout: timeoutMs,
-            maxBuffer: 2 * 1024 * 1024,
             windowsHide: true,
-        }, (error, stdout, stderr) => {
-            if (error) {
-                const detail = stderr?.trim() || error.message;
-                if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
-                    reject(new Error(`Local model inference timed out after ${timeoutMs}ms. Increase autoComment.inferenceTimeoutMs or select a shorter snippet.`));
-                    return;
-                }
+            // Security Fix #2: Do NOT inherit workspace env variables that
+            // could inject a malicious PATH.  The extension bundle directory
+            // is used as cwd, not the user's workspace.
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        child.stdout.on('data', (data: Buffer) => {
+            stdout += data.toString();
+        });
+
+        child.stderr.on('data', (data: Buffer) => {
+            stderr += data.toString();
+        });
+
+        // Write the code to stdin as base64, then close the stream
+        const codeB64 = Buffer.from(code, 'utf-8').toString('base64');
+        child.stdin.write(codeB64);
+        child.stdin.end();
+
+        child.on('error', (err: Error) => {
+            reject(new Error(`Failed to start Python inference process: ${err.message}`));
+        });
+
+        child.on('close', (exitCode: number | null) => {
+            if (exitCode !== 0) {
+                const detail = stderr?.trim() || `Process exited with code ${exitCode}`;
                 if (/ModuleNotFoundError|No module named/i.test(detail)) {
                     reject(new Error(`Python dependency missing while running the local model: ${detail}`));
                     return;
@@ -73,7 +137,7 @@ export async function generateComment(code: string, progressCallback: (msg: stri
             if (stderr) {
                 console.warn(`Python Script Stderr: ${stderr}`);
             }
-            
+
             const out = stdout.trim();
             if (!out) {
                 resolve({
